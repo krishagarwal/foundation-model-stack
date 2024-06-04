@@ -17,15 +17,21 @@ from fms.distributed.strategy import (
     TensorParallelStrategy,
     UniformModelParallelStrategy,
 )
-from fms.modules.attention import MultiHeadAttention
+# from fms.modules.attention import MultiHeadAttention
+# from fms.modules.feedforward import GatedLinearUnit
+from fms.modules.quarot.attention import MultiHeadAttention
+from fms.modules.quarot.feedforward import GatedLinearUnit
+
+
 from fms.modules.embedding import WordEmbedding
-from fms.modules.feedforward import GatedLinearUnit
 from fms.modules.layernorm import LayerNormParameterized
 from fms.modules.positions import RotaryEmbedding
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
 from fms.utils.tokenizers import _has_hf, get_tokenizer
+
+from fms.modules.quarot import utils
 
 
 # params emb_dim heads layers lr
@@ -316,6 +322,7 @@ class LLaMA(nn.Module):
             is_causal_mask = False
 
         x_in = self.shared(x_in)
+        x_in = x_in @ utils.rots[0][0]
 
         # this is the output cache for all the decoder layers
         present_key_value_states = []
@@ -342,6 +349,7 @@ class LLaMA(nn.Module):
         dec_out = self.dec_norm(dec_out)
         if self.config.p_dropout:
             dec_out = self.dropout(dec_out)
+        dec_out = dec_out @ utils.rots[0][1]
 
         return dec_out, present_key_value_states
 
@@ -405,6 +413,10 @@ models.register_model(
 models.register_model(_architecture_name, "7b", _llama_factory_factory(_7b_config))
 models.register_model(_architecture_name, "13b", _llama_factory_factory(_13b_config))
 models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_config))
+
+granite_7b_config = LLaMAConfig(src_vocab_size=32008)
+models.register_model(_architecture_name, "granite_7b", _llama_factory_factory(granite_7b_config))
+
 
 _convert_to_fused_qkv = serialization._legacy_attn_unfused_to_fused_adapter
 

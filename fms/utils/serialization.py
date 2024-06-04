@@ -1,4 +1,5 @@
 import collections
+import math
 import os
 import re
 from collections import ChainMap
@@ -17,9 +18,13 @@ from typing import (
     Union,
 )
 
+import scipy
+import scipy.linalg
 import torch
 
 from fms.modules.tp import TPModule
+
+from fms.modules.quarot import utils
 
 
 __adapters: MutableMapping[str, MutableMapping[str, Callable[[Mapping], Mapping]]] = {}
@@ -440,8 +445,14 @@ def _load_partial_state_dict(
             # If TP sharding is not needed, copy the parameter
             # into the model
             if not needs_tp_sharding or tp_module is None:
-                param = getattr(target_module, key_steps[-1])
-                param.copy_(tensor_value, non_blocking=True)
+                # e.g. target_module is Linear and param is Tensor (weight)
+                # if has function to load weights, pass full name of layer and weights
+                load_func = getattr(target_module, 'custom_load', None)
+                if load_func is not None and callable(load_func):
+                    load_func(tensor_value, key_steps, utils.get_pre_rot, utils.get_post_rot)
+                else:
+                    param = getattr(target_module, key_steps[-1])
+                    param.copy_(tensor_value, non_blocking=True)
             elif tp_module is not None and tp_module not in seen_tp_modules:
                 seen_tp_modules.add(tp_module)
                 tensor_values = {k: v for k, v in state_dict.items() if tp_prefix in k}
