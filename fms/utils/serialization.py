@@ -76,6 +76,15 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
     """
     Legacy adapter for converting pre 0.0.6 unfused attn weights to fused attn weights
     """
+    for key, tensor_value in orig_sd.items():
+        # Find where to put the weight and decide whether it needs TP'ing
+        name = key.split(".")
+        # TODO: is this the best place to do this?
+        if utils.weight_check(name, 'ln'):
+            utils.ln_attn[int(name[1])] = tensor_value.type(utils.dtype)
+        elif utils.weight_check(name, 'ff_ln'):
+            utils.ln_ffn[int(name[1])] = tensor_value.type(utils.dtype)
+
     new_sd = {}
     removed_params = set()
     orig_keys = set(orig_sd.keys())
@@ -111,12 +120,21 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
                 f"attn.in_proj.qkv_fused.{weight_type}",
                 name,
             )
+            qkv_unfused = [orig_sd.pop(w).type(utils.dtype) for w in unfused_weights]
+            for i, name in enumerate(unfused_weights):
+                name = name.split('.')
+                pre_rot = utils.get_pre_rot(name)
+                post_rot = utils.get_post_rot(name)
+                if pre_rot is not None:
+                    qkv_unfused[i] = (pre_rot @ qkv_unfused[i].T).T
+                if post_rot is not None:
+                    qkv_unfused[i] = (qkv_unfused[i].T @ post_rot).T # TODO: don't hardcode
             new_sd[new_name] = torch.cat(
-                [orig_sd.pop(w) for w in unfused_weights], dim=0
+                qkv_unfused, dim=0
             )
         else:
             new_sd[name] = orig_sd.pop(name)
-    return new_sd
+    return {k:v.type(torch.float64) for k,v in new_sd.items()} #new_sd # TODO: remove
 
 
 def _get_adapter(
@@ -452,7 +470,14 @@ def _load_partial_state_dict(
                     load_func(tensor_value, key_steps, utils.get_pre_rot, utils.get_post_rot)
                 else:
                     param = getattr(target_module, key_steps[-1])
-                    param.copy_(tensor_value, non_blocking=True)
+                    if utils.weight_check(key_steps, ['ln', 'ffn_ln']):
+                        # utils.ln_attn[int(key_steps[1])] = tensor_value
+                        param.copy_(torch.ones_like(tensor_value), non_blocking=True)
+                    # elif utils.weight_check(key_steps, 'ff_ln'):
+                    #     # utils.ln_ffn[int(key_steps[1])] = tensor_value
+                    #     param.copy_(torch.ones_like(tensor_value), non_blocking=True)
+                    else:
+                        param.copy_(tensor_value, non_blocking=True)
             elif tp_module is not None and tp_module not in seen_tp_modules:
                 seen_tp_modules.add(tp_module)
                 tensor_values = {k: v for k, v in state_dict.items() if tp_prefix in k}
