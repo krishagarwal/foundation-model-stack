@@ -46,6 +46,40 @@ class Linear(Module):
         #     bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
         #     init.uniform_(self.bias, -bound, bound)
 
+    def part_mmul(self, a: Tensor, b: Tensor):
+        # res = torch.zeros((*a.shape[:-1], b.shape[-1]), dtype=self.accdtype, device=a.device)
+        # idxs = list((x,) for x in range(input.shape[-3]))
+        # for i in range(-4, -len(input.shape) - 1, -1):
+        #     idxs = [(curr, *idx) for idx in idxs for curr in range(input.shape[i])]
+            
+        # for idx in idxs:
+        #     temp = res[idx]
+        #     torch._int_mm(a[idx].type(self.accdtype), b.type(self.accdtype), out=temp)
+        #     res[idx] = temp
+        # return res
+        # TODO: handle any dimensions like above
+        assert (len(a.shape) == 3)
+        res = torch.zeros((a.shape[0], a.shape[1], b.shape[-1]), dtype=self.accdtype, device=a.device)
+        # if a.shape[1] < 16: # TODO: check if more efficient way. int8 mmul seems to require 16 min dimension, maybe cause 16x16x16 tensor core
+        #     a_scratch = torch.zeros(a.shape[0], 16, a.shape[2])
+        for idx in range(a.shape[0]):
+            temp = res[idx]
+            a_part = a[idx]
+            if a.shape[1] < 17:
+                pad_val = (0, 0, 0, 17 - a_part.shape[0])
+                a_part = torch.nn.functional.pad(a_part, pad_val)
+                temp = torch.nn.functional.pad(temp, pad_val)
+
+            torch._int_mm(a_part, b, out=temp)
+
+            if a.shape[1] < 17:
+                temp = temp[:a.shape[1]]
+
+            res[idx] = temp
+        return res
+    def torch_part_mmul(self, a: Tensor, b: Tensor):
+        return a.type(self.accdtype) @ b.type(self.accdtype)
+
     def forward(self, input: tuple[Tensor, Tensor, Tensor]) -> Tensor:
         # return F.linear(input, self.weight, self.bias)
         input, input_scale, input_offset = input
@@ -56,11 +90,21 @@ class Linear(Module):
 
         # a * b = c
         # (a * as + ao) * (b * bs + bo) = (ab)(as*bs) + (a)(as*bo) + (b)(bs*ao) + I(ao*bo)
+        mul_func = self.part_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.torch_part_mmul
+        # if self.qdtype in [torch.int8, torch.int16, torch.int32]:
+        #     aab_dq = (a.type(self.accdtype) @ b.type(self.accdtype)).type(self.dtype) * a_s * b_s
+        #     a_dq = (a.type(self.dtype) * a_s) @ b_o.expand(k, 1)
+        #     b_dq = a_o.expand(1, k) @ (b.type(self.dtype) * b_s)
+        # else:
+            # ab_dq = (a.type(self.accdtype) @ b.type(self.accdtype)).type(self.dtype) * a_s * b_s
+            # a_dq = (a.type(self.dtype) * a_s) @ b_o.expand(k, 1)
+            # b_dq = a_o.expand(1, k) @ (b.type(self.dtype) * b_s)
+        # since it's actually a k-sized dot product of a_o * b_o
 
-        ab_dq = (a.type(self.accdtype) @ b.type(self.accdtype)).type(self.dtype) * a_s * b_s
+        ab_dq = mul_func(a, b).type(self.dtype) * a_s * b_s # TODO: for fp8 quantization, do the actual mul in fp8, accumilate fp32
         a_dq = (a.type(self.dtype) * a_s) @ b_o.expand(k, 1)
         b_dq = a_o.expand(1, k) @ (b.type(self.dtype) * b_s)
-        # since it's actually a k-sized dot product of a_o * b_o
+
         abo = k * a_o * b_o
 
         ab = ab_dq + a_dq + b_dq + abo
@@ -76,13 +120,10 @@ class Linear(Module):
         post_rot = get_post_rot(key_steps)
 
         if pre_rot is not None or post_rot is not None:
-            # old_device = weight.device # TODO: check if this is good, we move to GPU for fast matmul
-            # weight = weight.to(torch.get_default_device())
             if pre_rot is not None:
                 weight = pre_rot @ weight
             if post_rot is not None:
                 weight = weight @ post_rot
-            # weight = weight.to(old_device)
 
         # can just cast for basic fp types
         if self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:

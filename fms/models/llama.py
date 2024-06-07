@@ -321,7 +321,7 @@ class LLaMA(nn.Module):
         else:
             is_causal_mask = False
 
-        x_in = self.shared(x_in).type(torch.float32) # TODO: remove
+        x_in = self.shared(x_in) #.type(torch.float32) # TODO: remove
         x_in = x_in @ utils.rots[0][0]
 
         # this is the output cache for all the decoder layers
@@ -370,7 +370,7 @@ class LLaMA(nn.Module):
 
         if only_last_token:
             output = output[:, -1, :]
-        preds = self.shared(output.type(torch.float16), reverse=True) # TODO: remove
+        preds = self.shared(output, reverse=True) # .type(torch.float16) # TODO: remove
 
         if use_cache:
             return preds, cache

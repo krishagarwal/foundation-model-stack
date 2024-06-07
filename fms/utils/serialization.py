@@ -128,16 +128,16 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
                 if pre_rot is not None or post_rot is not None:
                     temp = qkv_unfused[i].T # .to(torch.get_default_device())
                     if pre_rot is not None:
-                        qkv_unfused[i] = (pre_rot @ temp)
+                        temp = (pre_rot @ temp)
                     if post_rot is not None:
-                        qkv_unfused[i] = (temp @ post_rot) # TODO: don't hardcode
+                        temp = (temp @ post_rot)
                     qkv_unfused[i] = temp.T
             new_sd[new_name] = torch.cat(
                 qkv_unfused, dim=0
             )
         else:
             new_sd[name] = orig_sd.pop(name)
-    return {k:v.type(torch.float32) for k,v in new_sd.items()} #new_sd # TODO: remove
+    return new_sd # {k:v.type(torch.float32) for k,v in new_sd.items()} # # TODO: remove
 
 
 def _get_adapter(
@@ -473,7 +473,7 @@ def _load_partial_state_dict(
                     load_func(tensor_value, key_steps, utils.get_pre_rot, utils.get_post_rot)
                 else:
                     param = getattr(target_module, key_steps[-1])
-                    if utils.weight_check(key_steps, ['ln', 'ffn_ln']):
+                    if utils.weight_check(key_steps, ['ln', 'ff_ln']):
                         # utils.ln_attn[int(key_steps[1])] = tensor_value
                         param.copy_(torch.ones_like(tensor_value), non_blocking=True)
                     # elif utils.weight_check(key_steps, 'ff_ln'):

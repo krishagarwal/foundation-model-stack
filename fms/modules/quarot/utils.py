@@ -2,9 +2,9 @@ import math
 import torch
 from scipy.linalg import hadamard
 
-dtype   =torch.float32 #16 #.float16
-qdtype  =torch.float32 #16 #.int8
-accdtype=torch.float32 #16 #.int16
+dtype   =torch.float16 # .float16 #
+qdtype  =torch.int8 # .float16 #
+accdtype=torch.int32 # 16 # .float16 #
 
 def quantize(weight, qdtype, device=None):
     if device is None:
@@ -12,9 +12,9 @@ def quantize(weight, qdtype, device=None):
     
     # TODO: make sure it works for all dtypes
     if qdtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
-        scale_max = torch.min(torch.finfo(qdtype).max, -torch.finfo(qdtype).min).to(weight.device) # TODO: check if doing scale/offset calculations on gpu is optimal
+        scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.int8, torch.int16]:
-        scale_max = torch.min(torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min).to(weight.device) # TODO: check if doing scale/offset calculations on gpu is optimal
+        scale_max = torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
         return weight.type(qdtype).to(device), torch.tensor(1, dtype=dtype).to(device), torch.tensor(0, dtype=dtype).to(device)
     else:
@@ -65,10 +65,11 @@ swap = torch.tensor([[0, 1], [1, 0]], dtype=dtype)
 for size in sizes:
     # tiled = diag_tile_block(swap, size // 2)
     # rots.append((tiled, tiled))
-    rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
-    # rots.append(get_almost_hadamard(size))
-index = 0
+    # # rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
+    rots.append(get_almost_hadamard(size))
 rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
+
+# index = 0
 # tiled = diag_tile_block(swap, sizes[index] // 2)
 # rots[index] = (tiled, tiled)
 
