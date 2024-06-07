@@ -76,19 +76,20 @@ class Linear(Module):
         post_rot = get_post_rot(key_steps)
 
         if pre_rot is not None or post_rot is not None:
-            weight = weight.cuda() # TODO: remove
+            # old_device = weight.device # TODO: check if this is good, we move to GPU for fast matmul
+            # weight = weight.to(torch.get_default_device())
             if pre_rot is not None:
                 weight = pre_rot @ weight
             if post_rot is not None:
                 weight = weight @ post_rot
-            weight = weight.cpu() # TODO: remove
+            # weight = weight.to(old_device)
 
         # can just cast for basic fp types
         if self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-            self.weight = torch.nn.Parameter(weight.type(self.qdtype).cuda(), requires_grad=False) # TODO: remove
+            self.weight = torch.nn.Parameter(weight.type(self.qdtype), requires_grad=False) # .to(torch.get_default_device())
             self.weight_scale = torch.tensor(1, dtype=self.dtype).to(self.weight.device)
             self.weight_offset = torch.tensor(0, dtype=self.dtype).to(self.weight.device)
             return
         
-        temp_weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype, torch.device('cuda'))
-        self.weight = torch.nn.Parameter(temp_weight, requires_grad=False) # TODO: remove
+        temp_weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype) # , torch.get_default_device())
+        self.weight = torch.nn.Parameter(temp_weight, requires_grad=False)

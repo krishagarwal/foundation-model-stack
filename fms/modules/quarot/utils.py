@@ -72,8 +72,10 @@ rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
 # tiled = diag_tile_block(swap, sizes[index] // 2)
 # rots[index] = (tiled, tiled)
 
-for i in range(len(rots)):
-    rots[i] = (rots[i][0].cuda(), rots[i][1].cuda()) # TODO: remove
+def init(device):
+    global rots
+    for i in range(len(rots)):
+        rots[i] = (rots[i][0].to(device), rots[i][1].to(device))
 
 def weight_check(key_steps, targets):
     if isinstance(targets, str):

@@ -11,6 +11,7 @@ from torch import distributed as dist
 from fms.models import get_model
 from fms.utils import generation, tokenizers
 from fms.utils.generation import generate
+from fms.modules.quarot import utils as qutils # TODO: clarify
 
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
@@ -90,6 +91,7 @@ if args.device_type == "cuda":
     torch.cuda.set_device(device)
 else:
     device = torch.device(args.device_type)
+qutils.init(device)
 
 torch.set_default_dtype(torch.float16)
 
