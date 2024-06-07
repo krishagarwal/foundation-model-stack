@@ -85,13 +85,10 @@ class Linear(Module):
 
         # can just cast for basic fp types
         if self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-            self.weight = torch.nn.Parameter(weight.type(self.qdtype), requires_grad=False)
-            self.weight_scale = torch.tensor(1, dtype=self.dtype)
-            self.weight_offset = torch.tensor(0, dtype=self.dtype)
+            self.weight = torch.nn.Parameter(weight.type(self.qdtype).cuda(), requires_grad=False) # TODO: remove
+            self.weight_scale = torch.tensor(1, dtype=self.dtype).to(self.weight.device)
+            self.weight_offset = torch.tensor(0, dtype=self.dtype).to(self.weight.device)
             return
-
-        temp_weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype)
-        self.weight_scale = self.weight_scale.cuda() # TODO: remove
-        self.weight_offset = self.weight_offset.cuda() # TODO: remove
-        self.weight = torch.nn.Parameter(temp_weight, requires_grad=False)
-        self.weight = self.weight.cuda() # TODO: remove
+        
+        temp_weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype, torch.device('cuda'))
+        self.weight = torch.nn.Parameter(temp_weight, requires_grad=False) # TODO: remove

@@ -6,14 +6,17 @@ dtype   =torch.float32 #16 #.float16
 qdtype  =torch.float32 #16 #.int8
 accdtype=torch.float32 #16 #.int16
 
-def quantize(weight, qdtype):
+def quantize(weight, qdtype, device=None):
+    if device is None:
+        device = weight.device
+    
     # TODO: make sure it works for all dtypes
     if qdtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
-        scale_max = min(torch.finfo(qdtype).max, -torch.finfo(qdtype).min)
+        scale_max = torch.min(torch.finfo(qdtype).max, -torch.finfo(qdtype).min).to(weight.device) # TODO: check if doing scale/offset calculations on gpu is optimal
     elif qdtype in [torch.int8, torch.int16]:
-        scale_max = min(torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min)
+        scale_max = torch.min(torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min).to(weight.device) # TODO: check if doing scale/offset calculations on gpu is optimal
     elif qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-        return weight.type(qdtype), torch.tensor(1, dtype=dtype), torch.tensor(0, dtype=dtype)
+        return weight.type(qdtype).to(device), torch.tensor(1, dtype=dtype).to(device), torch.tensor(0, dtype=dtype).to(device)
     else:
         raise ValueError("type not supported :(")
 
@@ -29,7 +32,7 @@ def quantize(weight, qdtype):
     scale = mag / scale_max
     remaining = remaining / (scale)
 
-    return remaining.type(qdtype), scale, offset
+    return remaining.type(qdtype).to(device), scale.to(device), offset.to(device)
 
 def diag_tile_block(block, reps):
     assert block.shape[-1] == block.shape[-2]
