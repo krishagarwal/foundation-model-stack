@@ -2,9 +2,9 @@ import math
 import torch
 from scipy.linalg import hadamard
 
-dtype   =torch.float64 #16 #.float16
-qdtype  =torch.float64 #16 #.int8
-accdtype=torch.float64 #16 #.int16
+dtype   =torch.float32 #16 #.float16
+qdtype  =torch.float32 #16 #.int8
+accdtype=torch.float32 #16 #.int16
 
 def quantize(weight, qdtype):
     # TODO: make sure it works for all dtypes
@@ -68,6 +68,9 @@ index = 0
 rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
 # tiled = diag_tile_block(swap, sizes[index] // 2)
 # rots[index] = (tiled, tiled)
+
+for i in range(len(rots)):
+    rots[i] = (rots[i][0].cuda(), rots[i][1].cuda()) # TODO: remove
 
 def weight_check(key_steps, targets):
     if isinstance(targets, str):

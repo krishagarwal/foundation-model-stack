@@ -81,9 +81,9 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
         name = key.split(".")
         # TODO: is this the best place to do this?
         if utils.weight_check(name, 'ln'):
-            utils.ln_attn[int(name[1])] = tensor_value.type(utils.dtype)
+            utils.ln_attn[int(name[1])] = tensor_value.type(utils.dtype).cuda() # TODO: remove
         elif utils.weight_check(name, 'ff_ln'):
-            utils.ln_ffn[int(name[1])] = tensor_value.type(utils.dtype)
+            utils.ln_ffn[int(name[1])] = tensor_value.type(utils.dtype).cuda() # TODO: remove
 
     new_sd = {}
     removed_params = set()
@@ -125,16 +125,19 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
                 name = name.split('.')
                 pre_rot = utils.get_pre_rot(name)
                 post_rot = utils.get_post_rot(name)
-                if pre_rot is not None:
-                    qkv_unfused[i] = (pre_rot @ qkv_unfused[i].T).T
-                if post_rot is not None:
-                    qkv_unfused[i] = (qkv_unfused[i].T @ post_rot).T # TODO: don't hardcode
+                if pre_rot is not None or post_rot is not None:
+                    temp = qkv_unfused[i].T.cuda() # TODO: remove
+                    if pre_rot is not None:
+                        qkv_unfused[i] = (pre_rot @ temp)
+                    if post_rot is not None:
+                        qkv_unfused[i] = (temp @ post_rot) # TODO: don't hardcode
+                    qkv_unfused[i] = temp.T
             new_sd[new_name] = torch.cat(
                 qkv_unfused, dim=0
             )
         else:
             new_sd[name] = orig_sd.pop(name)
-    return {k:v.type(torch.float64) for k,v in new_sd.items()} #new_sd # TODO: remove
+    return {k:v.type(torch.float32) for k,v in new_sd.items()} #new_sd # TODO: remove
 
 
 def _get_adapter(

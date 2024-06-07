@@ -75,10 +75,13 @@ class Linear(Module):
         pre_rot = get_pre_rot(key_steps)
         post_rot = get_post_rot(key_steps)
 
-        if pre_rot is not None:
-            weight = pre_rot @ weight
-        if post_rot is not None:
-            weight = weight @ post_rot
+        if pre_rot is not None or post_rot is not None:
+            weight = weight.cuda() # TODO: remove
+            if pre_rot is not None:
+                weight = pre_rot @ weight
+            if post_rot is not None:
+                weight = weight @ post_rot
+            weight = weight.cpu() # TODO: remove
 
         # can just cast for basic fp types
         if self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
@@ -88,4 +91,7 @@ class Linear(Module):
             return
 
         temp_weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype)
+        self.weight_scale = self.weight_scale.cuda() # TODO: remove
+        self.weight_offset = self.weight_offset.cuda() # TODO: remove
         self.weight = torch.nn.Parameter(temp_weight, requires_grad=False)
+        self.weight = self.weight.cuda() # TODO: remove
