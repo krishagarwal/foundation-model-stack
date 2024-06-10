@@ -79,12 +79,6 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
     for key, tensor_value in orig_sd.items():
         # Find where to put the weight and decide whether it needs TP'ing
         name = key.split(".")
-        # TODO: is this the best place to do this?
-        if utils.weight_check(name, 'ln'):
-            utils.ln_attn[int(name[1])] = tensor_value.type(utils.dtype) # .to(torch.get_default_device())
-        elif utils.weight_check(name, 'ff_ln'):
-            utils.ln_ffn[int(name[1])] = tensor_value.type(utils.dtype) # .to(torch.get_default_device())
-
     new_sd = {}
     removed_params = set()
     orig_keys = set(orig_sd.keys())
@@ -123,7 +117,7 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
             qkv_unfused = [orig_sd.pop(w).type(utils.dtype) for w in unfused_weights]
             for i, name in enumerate(unfused_weights):
                 name = name.split('.')
-                pre_rot = utils.get_pre_rot(name)
+                pre_rot = utils.get_pre_rot(name) # TODO: move to load partial state dict
                 post_rot = utils.get_post_rot(name)
                 if pre_rot is not None or post_rot is not None:
                     temp = qkv_unfused[i].T # .to(torch.get_default_device())
@@ -409,6 +403,15 @@ def load_state_dict_into_model(
                 if partial_sd[psd_key].device != initial_device:
                     partial_sd[psd_key] = partial_sd[psd_key].to(device=initial_device)
             fms_partial_sd = adapter(partial_sd)
+
+            for psdk, psdv in fms_partial_sd.items():
+                key_steps = psdk.split('.')
+                # TODO: is this the best place to do this?
+                if utils.weight_check(key_steps, 'ln'):
+                    utils.ln_attn[int(key_steps[1])] = psdv.type(utils.dtype) # .to(torch.get_default_device())
+                elif utils.weight_check(key_steps, 'ff_ln'):
+                    utils.ln_ffn[int(key_steps[1])] = psdv.type(utils.dtype) # .to(torch.get_default_device())
+
             _load_partial_state_dict(model, fms_partial_sd, needs_tp_sharding)
             # Be aggressive in removing weights to save as much memory as possible
             for p_key in partial_sd.keys():

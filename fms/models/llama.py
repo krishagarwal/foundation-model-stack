@@ -457,9 +457,9 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
         (r"^model.embed_tokens.weight", "shared.emb.weight"),
         (r"^model.norm", "dec_norm"),
         (r"^model.layers", "layers"),
-        (r"self_attn\.k_proj", "attn.key"),
-        (r"self_attn\.v_proj", "attn.value"),
-        (r"self_attn\.q_proj", "attn.query"),
+        (r"self_attn\.k_proj", "attn.in_proj.key"), # TODO: check, we changed this so it matches class structure (added '.in_proj')
+        (r"self_attn\.v_proj", "attn.in_proj.value"),
+        (r"self_attn\.q_proj", "attn.in_proj.query"),
         (r"self_attn\.o_proj", "attn.dense"),
         (r"mlp\.gate_proj", "ff_sub_layer.wg"),
         (r"mlp\.up_proj", "ff_sub_layer.w1"),
@@ -469,7 +469,7 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     ]
     new_sd = {}
 
-    trans_required_pattern = re.compile("layers.[0-9]+.attn.(query|key).weight")
+    trans_required_pattern = re.compile("layers.[0-9]+.attn.in_proj.(query|key).weight")
     for name, param in hf_sd.items():
         new_name = name
         for pattern, repl in replacements:
@@ -492,7 +492,7 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
 
             new_sd[new_name] = temp
 
-    fused_sd = _convert_to_fused_qkv(new_sd)
+    fused_sd = new_sd # _convert_to_fused_qkv(new_sd) # TODO: add back in? might not be compatible with quantization
 
     return fused_sd
 

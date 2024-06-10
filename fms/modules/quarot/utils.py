@@ -1,12 +1,13 @@
 import math
 import torch
 from scipy.linalg import hadamard
+import random
 
 dtype   =torch.float16 # .float16 #
 qdtype  =torch.int8 # .float16 #
 accdtype=torch.int32 # 16 # .float16 #
 
-def quantize(weight, qdtype, device=None):
+def quantize(weight, qdtype, device=None): # TODO: RTN, not cast int
     if device is None:
         device = weight.device
     
@@ -41,20 +42,109 @@ def diag_tile_block(block, reps):
         [torch.roll(row, block.shape[-1] * i, 1) for i in range(0, reps)]
     )
 
-def get_almost_hadamard(size: int):
-    tile_size = 1
-    while size % tile_size == 0:
-        tile_size *= 2
-    tile_size //= 2
-    tile_count = size // tile_size
+# def get_almost_hadamard(size: int):
+#     tile_size = 1
+#     while size % tile_size == 0:
+#         tile_size *= 2
+#     tile_size //= 2
+#     tile_count = size // tile_size
 
-    temp = torch.tensor(hadamard(tile_size), dtype=torch.float32) / torch.sqrt(torch.tensor(tile_size))
-    m = diag_tile_block(temp, tile_count)
+#     temp = torch.tensor(hadamard(tile_size), dtype=torch.float32) / torch.sqrt(torch.tensor(tile_size))
+#     m = diag_tile_block(temp, tile_count)
 
-    m_inv = m.T
-    m = m.type(dtype)
-    m_inv = m_inv.type(dtype)
-    return m, m_inv
+#     m_inv = m.T
+#     m = m.type(dtype)
+#     m_inv = m_inv.type(dtype)
+#     return m, m_inv
+
+num_test_hadamards = 1
+num_orthogonality_tests = 100
+max_allowed_inv_value = 1000
+dot_threshold = 0.5
+fail_print_interval = 10
+
+cached_rotations = {}
+def random_rotation_almost_hadamard(size: int, use_hardcoded, run_full_orthogonality_tests, check_inv_max):
+    if use_hardcoded:
+        tile_size = 1
+        while size % tile_size == 0:
+            tile_size *= 2
+        tile_size //= 2
+        tile_count = size // tile_size
+
+        temp = torch.tensor(hadamard(tile_size), dtype=torch.float32) / torch.sqrt(torch.tensor(tile_size))
+        m = diag_tile_block(temp, tile_count)
+
+        m_inv = m.T
+        m = m.type(torch.float16)
+        m_inv = m_inv.type(torch.float16)
+        return m, m_inv
+    else:
+        if size in cached_rotations:
+            return cached_rotations[size]
+
+        fail_count = 0
+        potential = []
+        while len(potential) < num_test_hadamards:
+            try:
+                m = torch.where(torch.rand((size, size)) >= 0.5, -1, 1).type(torch.float32) / torch.sqrt(torch.tensor(size))
+
+                avg_row_dot_prod = 0
+                tests_passed = True
+                if run_full_orthogonality_tests:
+                    for i in range(size):
+                        for j in range(i + 1, size):
+                            dot_prod = torch.abs(torch.nn.functional.cosine_similarity(m[i], m[j], dim=0))
+                            if dot_prod > dot_threshold:
+                                tests_passed = False
+                                break
+                            avg_row_dot_prod += dot_prod
+                        if not tests_passed:
+                            break
+                else:
+                    for _ in range(num_orthogonality_tests):
+                        i, j = 0, 0
+                        while i == j:
+                            i, j = random.randrange(size), random.randrange(size)
+                        dot_prod = torch.abs(torch.nn.functional.cosine_similarity(m[i], m[j], dim=0))
+                        if dot_prod > dot_threshold:
+                            tests_passed = False
+                            break
+                        avg_row_dot_prod += dot_prod
+                
+                if not tests_passed:
+                    fail_count += 1
+                    if fail_count % fail_print_interval == 0:
+                        print(f"failed {fail_count} times")
+                    continue
+                avg_row_dot_prod /= (size - 1) * (size - 2)
+
+                # since this isn't quite a hadamard matrix, it might have an extreme inverse
+                # if it's too extreme, it could cause inf in float16 when multiplied; also
+                # restricting maximum value in inverse could make the inverse closer to a
+                # rotation matrix, which is ideal
+                m_inv = torch.inverse(m).type(torch.float16)
+                # TODO: determine what max value is acceptable
+                if not check_inv_max or torch.max(torch.square(m_inv).sum(dim=1).sqrt()) < max_allowed_inv_value:
+                    potential.append((m, avg_row_dot_prod))
+                else:
+                    fail_count += 1
+                    if fail_count % fail_print_interval == 0:
+                        print(f"failed {fail_count} times")
+                
+            except Exception as e:
+                print(e)
+                pass
+        m, _ = min(potential, key=lambda x: x[1])
+
+        m_inv = torch.inverse(m)
+        m = m.type(torch.float16)
+        m_inv = m_inv.type(torch.float16)
+
+        cached_rotations[size] = (m, m_inv)
+        
+        return m, m_inv
+
 
 ln_attn = ['error'] * 32
 ln_ffn = ['error'] * 32
@@ -65,13 +155,14 @@ swap = torch.tensor([[0, 1], [1, 0]], dtype=dtype)
 for size in sizes:
     # tiled = diag_tile_block(swap, size // 2)
     # rots.append((tiled, tiled))
-    # # rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
-    rots.append(get_almost_hadamard(size))
-rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
+    rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
+    # r, _ = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
+    # rots.append((r, r.T))
 
-# index = 0
-# tiled = diag_tile_block(swap, sizes[index] // 2)
-# rots[index] = (tiled, tiled)
+# idx = 1
+# tiled = diag_tile_block(swap, sizes[idx] // 2)
+# rots[idx] = (tiled, tiled)
+rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
 
 def init(device):
     global rots

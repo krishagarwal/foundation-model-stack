@@ -189,7 +189,7 @@ class MultiHeadAttention(nn.Module):
         p_dropout=None,
         use_bias=False,
         position_encoder: Optional[PositionEncoder] = None,
-        fused: bool = True,
+        fused: bool = False, #True,
     ):
         super(MultiHeadAttention, self).__init__()
         self.nheads = nheads
@@ -277,8 +277,9 @@ class MultiHeadAttention(nn.Module):
         values = values.transpose(2, 1)  # compatible with QK.T
 
         queries = queries @ utils.rots[2][0]
-        keys = keys @ utils.rots[2][0]
+        keys = keys @ utils.rots[2][1].T
 
+        # TODO: kv cache quantization
         # if you want to use caching and past_key_value_state is not None meaning you have values in your cache
         if (
             use_cache
@@ -328,6 +329,7 @@ class MultiHeadAttention(nn.Module):
             torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
             torch.backends.cuda.enable_math_sdp(use_math)
 
+        # TODO: is this quantized in QuaRot and SpinQuant?
         attn = F.scaled_dot_product_attention(
             queries,
             keys_e,

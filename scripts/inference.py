@@ -184,7 +184,7 @@ max_len = max([len(prompt) for prompt in [prompt1, prompt2]])
 # prompt2 = pad_prompt(prompt2, max_len)
 # ids = torch.stack((prompt2, prompt1), dim=0)
 
-ids = prompt1.unsqueeze(0)
+ids = prompt1.unsqueeze(0) # TODO: revert to prompt 1 (change for testing)
 
 
 def print_result(result):
