@@ -7,7 +7,7 @@ dtype   =torch.float16 # .float16 #
 qdtype  =torch.int8 # .float16 #
 accdtype=torch.int32 # 16 # .float16 #
 
-def quantize(weight, qdtype, device=None): # TODO: RTN, not cast int
+def quantize(weight, qdtype, device=None):
     if device is None:
         device = weight.device
     
@@ -33,7 +33,7 @@ def quantize(weight, qdtype, device=None): # TODO: RTN, not cast int
     scale = mag / scale_max
     remaining = remaining / (scale)
 
-    return remaining.type(qdtype).to(device), scale.to(device), offset.to(device)
+    return remaining.round().type(qdtype).to(device), scale.to(device), offset.to(device)
 
 def diag_tile_block(block, reps):
     assert block.shape[-1] == block.shape[-2]
@@ -155,8 +155,9 @@ swap = torch.tensor([[0, 1], [1, 0]], dtype=dtype)
 for size in sizes:
     # tiled = diag_tile_block(swap, size // 2)
     # rots.append((tiled, tiled))
-    rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
-    # r, _ = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
+    # rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
+    r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=False, run_full_orthogonality_tests=False, check_inv_max=True)
+    rots.append((r, r_inv))
     # rots.append((r, r.T))
 
 # idx = 1
