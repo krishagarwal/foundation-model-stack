@@ -496,9 +496,24 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
 
     return fused_sd
 
+def _hf_gptq_int8_to_fms_sd(hf_sd: Mapping) -> Mapping:
+    new_sd = {}
+    for name, param in hf_sd.items():
+        new_name = re.sub("qweight", "weight", name)
+        new_param = torch.zeros((param.shape[0] * 4, param.shape[1]), dtype=torch.int8).to(param.device)
+        row = 0
+        i = 0
+        while row < param.shape[0]:
+            for j in range(i, i + 4):
+                new_param[j] = (param[row] >> (8 * (j - i))) & 0xFF
+            i += 4
+            row += 1
+        new_sd[new_name] = new_param
+    return _hf_sd_to_fms_sd(new_sd)
 
 serialization.register_adapter("llama", "meta", _rename_weights_to_fms)
 serialization.register_adapter("llama", "hf", _hf_sd_to_fms_sd)
+serialization.register_adapter("llama", "hf-gptq-int8", _hf_gptq_int8_to_fms_sd)
 serialization.register_adapter("llama", "fms.pre0.0.6", _convert_to_fused_qkv)
 
 

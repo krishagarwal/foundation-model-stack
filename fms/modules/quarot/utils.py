@@ -2,10 +2,12 @@ import math
 import torch
 from scipy.linalg import hadamard
 import random
+from kmeans_gpu import KMeans
 
-dtype   =torch.float16 # .float16 #
-qdtype  =torch.int8 # .float16 #
-accdtype=torch.int32 # 16 # .float16 #
+dtype   =torch.float16 # float16 # .float16 #
+qdtype  =torch.float8_e4m3fn  #_e5m2 # int8 # .float16 #
+accdtype=torch.float16 # int32 # 16 # .float16 #
+use_quant_map = False
 
 def quantize(weight, qdtype, device=None):
     if device is None:
@@ -13,7 +15,8 @@ def quantize(weight, qdtype, device=None):
     
     # TODO: make sure it works for all dtypes
     if qdtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
-        scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
+        return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device), torch.tensor(0, dtype=dtype).to(device)
+        # scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.int8, torch.int16]:
         scale_max = torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
@@ -41,21 +44,6 @@ def diag_tile_block(block, reps):
     return torch.concat(
         [torch.roll(row, block.shape[-1] * i, 1) for i in range(0, reps)]
     )
-
-# def get_almost_hadamard(size: int):
-#     tile_size = 1
-#     while size % tile_size == 0:
-#         tile_size *= 2
-#     tile_size //= 2
-#     tile_count = size // tile_size
-
-#     temp = torch.tensor(hadamard(tile_size), dtype=torch.float32) / torch.sqrt(torch.tensor(tile_size))
-#     m = diag_tile_block(temp, tile_count)
-
-#     m_inv = m.T
-#     m = m.type(dtype)
-#     m_inv = m_inv.type(dtype)
-#     return m, m_inv
 
 num_test_hadamards = 1
 num_orthogonality_tests = 100
@@ -151,16 +139,14 @@ ln_ffn = ['error'] * 32
 
 rots = []
 sizes = [4096, 128, 128, 11008]
-swap = torch.tensor([[0, 1], [1, 0]], dtype=dtype)
 for size in sizes:
-    # tiled = diag_tile_block(swap, size // 2)
-    # rots.append((tiled, tiled))
     # rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
-    r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=False, run_full_orthogonality_tests=False, check_inv_max=True)
+    r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
     rots.append((r, r_inv))
-    # rots.append((r, r.T))
+    # # rots.append((r, r.T))
 
 # idx = 1
+# swap = torch.tensor([[0, 1], [1, 0]], dtype=dtype)
 # tiled = diag_tile_block(swap, sizes[idx] // 2)
 # rots[idx] = (tiled, tiled)
 rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
@@ -197,3 +183,18 @@ def get_post_rot(key_steps):
     else:
         return None
 
+def quantize_cluster(weights: torch.Tensor):
+    temp_device = weights.device
+    centroids = KMeans(n_clusters=256)(weights.view(1, -1, 1).to(torch.float32))
+    centroids = centroids.to(torch.float16)
+    # avgs = [x[0] for x in kmeans.cluster_centers_]
+    dist = weights.view(weights.shape[0], weights.shape[1], 1) - centroids.view(1, 1, 16)
+    abs_dist = torch.abs(dist)
+    closest_idx = torch.argmin(abs_dist, dim=2).to(torch.uint8) # TODO: choose index dtype
+    return closest_idx.to(temp_device), centroids.view(-1)
+
+def dequantize_cluster(weights: torch.Tensor, avgs: torch.Tensor):
+    final_result = torch.zeros_like(weights)
+    for i, val in enumerate(avgs):
+        final_result = torch.where(weights == i, val, final_result)
+    return final_result

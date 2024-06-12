@@ -78,8 +78,31 @@ class Linear(Module):
 
             res[idx] = temp
         return res
-    def torch_part_mmul(self, a: Tensor, b: Tensor):
-        return a.type(self.accdtype) @ b.type(self.accdtype)
+    def torch_part_mmul(self, a: Tensor, b: Tensor): #a[i], b.T b, a[i].T
+        # return torch.cat([torch._scaled_mm(b, a[i].T, out_dtype=utils.accdtype) for i in range(a.shape[0])]) # TODO: .T or rearrange b to be column major?
+        # return a.type(self.accdtype) @ b.type(self.accdtype)
+
+        # TODO: handle any dimensions like above
+        assert (len(a.shape) == 3)
+        res = torch.zeros((a.shape[0], a.shape[1], b.shape[-1]), dtype=self.accdtype, device=a.device)
+        # if a.shape[1] < 16: # TODO: check if more efficient way. int8 mmul seems to require 16 min dimension, maybe cause 16x16x16 tensor core
+        #     a_scratch = torch.zeros(a.shape[0], 16, a.shape[2])
+        for idx in range(a.shape[0]):
+            temp = res[idx]
+            a_part = a[idx]
+            # if a.shape[1] % 17:
+            pad_val = (0, 0, 0, (16 - a_part.shape[0] % 16) % 16)
+            a_part = torch.nn.functional.pad(a_part, pad_val)
+            temp = torch.nn.functional.pad(temp, pad_val)
+
+            # TODO: has strange restrictions, optimize (e.g. can we avoid requiring 17 leading dimension? we usually use only 1)
+            torch._scaled_mm(a_part.T, b, out=temp) # a_part, b, out=temp)
+
+            # if a.shape[1] < 17:
+            temp = temp[:a.shape[1]]
+
+            res[idx] = temp
+        return res
 
     def forward(self, input: tuple[Tensor, Tensor, Tensor]) -> Tensor:
         # return F.linear(input, self.weight, self.bias)
@@ -115,7 +138,7 @@ class Linear(Module):
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
 
-    def custom_load(self, weight, key_steps, get_pre_rot, get_post_rot):
+    def custom_load(self, weight, key_steps, get_pre_rot, get_post_rot, scale=None, offset=None):
         try:
             weight = weight.type(self.dtype).T # transpose weights, since the linear layer is y = xA^T
             pre_rot = get_pre_rot(key_steps)
@@ -126,15 +149,26 @@ class Linear(Module):
                     weight = pre_rot @ weight
                 if post_rot is not None:
                     weight = weight @ post_rot
-
-            # can just cast for basic fp types
-            if self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-                self.weight = torch.nn.Parameter(weight.type(self.qdtype), requires_grad=False) # .to(torch.get_default_device())
-                self.weight_scale = torch.tensor(1, dtype=self.dtype).to(self.weight.device)
-                self.weight_offset = torch.tensor(0, dtype=self.dtype).to(self.weight.device)
-                return
             
-            temp_weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype) # , torch.get_default_device())
-            self.weight = torch.nn.Parameter(temp_weight, requires_grad=False)
+            # using gpt8 weights
+            if scale is not None and offset is not None:
+                self.weight_scale = scale.T.to(weight.device)
+                self.weight_offset = offset.T.to(weight.device)
+            elif utils.use_quant_map:
+                # weight = torch.load("map_quant_weights/" + ".".join(key_steps))
+                # weight = weight.cuda()
+                weight = utils.dequantize_cluster(*utils.quantize_cluster(weight)) # TODO: dequant should be done in shared memory live
+                self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device)
+                self.weight_offset = torch.tensor(0, dtype=self.dtype).to(weight.device) # TODO: make optional
+                torch.save(weight, "map_quant_weights_8/" + ".".join(key_steps))
+                print("map quantized", key_steps)
+            # can just cast for basic fp types
+            elif self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
+                weight = weight.type(self.qdtype) # .to(torch.get_default_device())
+                self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device)
+                self.weight_offset = torch.tensor(0, dtype=self.dtype).to(weight.device)
+            else:
+                weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype) # , torch.get_default_device())
+            self.weight = torch.nn.Parameter(weight, requires_grad=False)
         except Exception as e:
             raise Exception(repr(e))

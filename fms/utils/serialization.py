@@ -473,7 +473,10 @@ def _load_partial_state_dict(
                 # if has function to load weights, pass full name of layer and weights
                 load_func = getattr(target_module, 'custom_load', None)
                 if load_func is not None and callable(load_func):
-                    load_func(tensor_value, key_steps, utils.get_pre_rot, utils.get_post_rot)
+                    prefix = ".".join(key_steps[:-2])
+                    scale = state_dict.get(prefix + ".scales")
+                    offset = state_dict.get(prefix + ".zeros")
+                    load_func(tensor_value, key_steps, utils.get_pre_rot, utils.get_post_rot, scale, offset)
                 else:
                     param = getattr(target_module, key_steps[-1])
                     if utils.weight_check(key_steps, ['ln', 'ff_ln']):
