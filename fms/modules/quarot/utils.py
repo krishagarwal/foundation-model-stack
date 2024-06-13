@@ -4,39 +4,42 @@ from scipy.linalg import hadamard
 import random
 from kmeans_gpu import KMeans
 
-dtype   =torch.float16 # float16 # .float16 #
-qdtype  =torch.float8_e4m3fn  #_e5m2 # int8 # .float16 #
-accdtype=torch.float16 # int32 # 16 # .float16 #
+dtype    = torch.float16
+qdtype   = torch.float8_e4m3fn # int8  #_e5m2
+accdtype = torch.float16 # int32
 use_quant_map = False
+skip_bad_layers = False
+test_against_truth = True
+test_float_range = (0.1, 2)# None
+test_float_vals = 5
 
-def quantize(weight, qdtype, device=None):
+temp_layer = 0
+
+def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None) -> tuple[torch.Tensor, torch.Tensor]:
     if device is None:
         device = weight.device
     
     # TODO: make sure it works for all dtypes
     if qdtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
-        return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device), torch.tensor(0, dtype=dtype).to(device)
+        # temp, _ = weight.abs().max(dim=dim, keepdim=True)
+        # temp = 1#2.4
+        temp = torch.sqrt(torch.tensor(65504 * 0.7 / weight.shape[dim]))
+        scale_max = torch.tensor(temp).to(weight.device, dtype=dtype)
+        # return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device)
         # scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.int8, torch.int16]:
         scale_max = torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-        return weight.type(qdtype).to(device), torch.tensor(1, dtype=dtype).to(device), torch.tensor(0, dtype=dtype).to(device)
+        return weight.type(qdtype).to(device), torch.tensor(1, dtype=dtype).to(device)
     else:
         raise ValueError("type not supported :(")
 
-    minv = weight.min()
-    maxv = weight.max()
-
-    avg = (maxv + minv) / 2
-    mag = maxv - avg
-
-    offset = avg
-    remaining = weight - offset
-
+    mag, _ = weight.abs().max(dim=dim, keepdim=True)
     scale = mag / scale_max
-    remaining = remaining / (scale)
-
-    return remaining.round().type(qdtype).to(device), scale.to(device), offset.to(device)
+    weight = weight / scale
+    if qdtype in [torch.int8, torch.int16]:
+        weight = weight.round()
+    return weight.type(qdtype).to(device), scale.to(device)
 
 def diag_tile_block(block, reps):
     assert block.shape[-1] == block.shape[-2]
@@ -60,12 +63,12 @@ def random_rotation_almost_hadamard(size: int, use_hardcoded, run_full_orthogona
         tile_size //= 2
         tile_count = size // tile_size
 
-        temp = torch.tensor(hadamard(tile_size), dtype=torch.float32) / torch.sqrt(torch.tensor(tile_size))
+        temp = torch.tensor(hadamard(tile_size), dtype=torch.float32) * torch.rsqrt(torch.tensor(tile_size))
         m = diag_tile_block(temp, tile_count)
 
         m_inv = m.T
-        m = m.type(torch.float16)
-        m_inv = m_inv.type(torch.float16)
+        m = m.type(dtype)
+        m_inv = m_inv.type(dtype)
         return m, m_inv
     else:
         if size in cached_rotations:
@@ -126,8 +129,8 @@ def random_rotation_almost_hadamard(size: int, use_hardcoded, run_full_orthogona
         m, _ = min(potential, key=lambda x: x[1])
 
         m_inv = torch.inverse(m)
-        m = m.type(torch.float16)
-        m_inv = m_inv.type(torch.float16)
+        m = m.type(dtype)
+        m_inv = m_inv.type(dtype)
 
         cached_rotations[size] = (m, m_inv)
         
@@ -140,10 +143,10 @@ ln_ffn = ['error'] * 32
 rots = []
 sizes = [4096, 128, 128, 11008]
 for size in sizes:
-    # rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
-    r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
-    rots.append((r, r_inv))
-    # # rots.append((r, r.T))
+    rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
+    # r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
+    # rots.append((r, r_inv))
+    # rots.append((r, r.T))
 
 # idx = 1
 # swap = torch.tensor([[0, 1], [1, 0]], dtype=dtype)

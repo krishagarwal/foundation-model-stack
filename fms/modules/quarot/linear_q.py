@@ -26,14 +26,7 @@ class Linear(Module):
         self.dtype = dtype
         self.accdtype = accdtype
         self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs))
-
-        # .type(self.dtype) for scale and offset
-
-
-        # if bias:
-        #     self.bias = Parameter(torch.empty(out_features, **factory_kwargs))
-        # else:
-        #     self.register_parameter('bias', None)
+        self.is_quantized = True
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -41,12 +34,8 @@ class Linear(Module):
         # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
         # https://github.com/pytorch/pytorch/issues/57109
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        # if self.bias is not None:
-        #     fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-        #     bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-        #     init.uniform_(self.bias, -bound, bound)
 
-    def part_mmul(self, a: Tensor, b: Tensor):
+    def int_mmul(self, a: Tensor, b: Tensor):
         # res = torch.zeros((*a.shape[:-1], b.shape[-1]), dtype=self.accdtype, device=a.device)
         # idxs = list((x,) for x in range(input.shape[-3]))
         # for i in range(-4, -len(input.shape) - 1, -1):
@@ -57,6 +46,7 @@ class Linear(Module):
         #     torch._int_mm(a[idx].type(self.accdtype), b.type(self.accdtype), out=temp)
         #     res[idx] = temp
         # return res
+
         # TODO: handle any dimensions like above
         assert (len(a.shape) == 3)
         res = torch.zeros((a.shape[0], a.shape[1], b.shape[-1]), dtype=self.accdtype, device=a.device)
@@ -78,8 +68,9 @@ class Linear(Module):
 
             res[idx] = temp
         return res
-    def torch_part_mmul(self, a: Tensor, b: Tensor): #a[i], b.T b, a[i].T
-        # return torch.cat([torch._scaled_mm(b, a[i].T, out_dtype=utils.accdtype) for i in range(a.shape[0])]) # TODO: .T or rearrange b to be column major?
+
+    def fp8_mmul(self, a: Tensor, b: Tensor):
+        # return torch.cat([torch._scaled_mm(a[i], b, out_dtype=utils.accdtype) for i in range(a.shape[0])]) # TODO: .T or rearrange b to be column major?
         # return a.type(self.accdtype) @ b.type(self.accdtype)
 
         # TODO: handle any dimensions like above
@@ -96,7 +87,8 @@ class Linear(Module):
             temp = torch.nn.functional.pad(temp, pad_val)
 
             # TODO: has strange restrictions, optimize (e.g. can we avoid requiring 17 leading dimension? we usually use only 1)
-            torch._scaled_mm(a_part.T, b, out=temp) # a_part, b, out=temp)
+            # TODO: check what amax _ is
+            temp, _ = torch._scaled_mm(a_part, b) # a_part, b, out=temp)
 
             # if a.shape[1] < 17:
             temp = temp[:a.shape[1]]
@@ -104,44 +96,39 @@ class Linear(Module):
             res[idx] = temp
         return res
 
-    def forward(self, input: tuple[Tensor, Tensor, Tensor]) -> Tensor:
+    def basic_mmul(self, a: Tensor, b: Tensor):
+        return a.type(utils.accdtype) @ b.type(utils.accdtype)
+
+    def forward(self, input) -> Tensor:
         # return F.linear(input, self.weight, self.bias)
-        input, input_scale, input_offset = input
+        if not self.is_quantized: # input will be Tensor
+            return self.basic_mmul(input, self.weight)
+        
+        # input is tuple if quantized
+        input, input_scale = input
         assert input.dtype == self.qdtype, f"input: {input.dtype}, self: {self.qdtype}"
-        a, a_s, a_o = input, input_scale.type(self.dtype), input_offset.type(self.dtype)
-        b, b_s, b_o = self.weight, self.weight_scale, self.weight_offset
-        k = self.in_features
+        
+        a, a_s = input, input_scale.type(self.dtype)
+        b, b_s = self.weight, self.weight_scale
+
+        mul_func = self.int_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.fp8_mmul if self.qdtype in [torch.float8_e4m3fn] else self.basic_mmul
 
         # a * b = c
-        # (a * as + ao) * (b * bs + bo) = (ab)(as*bs) + (a)(as*bo) + (b)(bs*ao) + I(ao*bo)
-        mul_func = self.part_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.torch_part_mmul
-        # if self.qdtype in [torch.int8, torch.int16, torch.int32]:
-        #     aab_dq = (a.type(self.accdtype) @ b.type(self.accdtype)).type(self.dtype) * a_s * b_s
-        #     a_dq = (a.type(self.dtype) * a_s) @ b_o.expand(k, 1)
-        #     b_dq = a_o.expand(1, k) @ (b.type(self.dtype) * b_s)
-        # else:
-            # ab_dq = (a.type(self.accdtype) @ b.type(self.accdtype)).type(self.dtype) * a_s * b_s
-            # a_dq = (a.type(self.dtype) * a_s) @ b_o.expand(k, 1)
-            # b_dq = a_o.expand(1, k) @ (b.type(self.dtype) * b_s)
-        # since it's actually a k-sized dot product of a_o * b_o
-
-        ab_dq = (mul_func(a, b).type(torch.float32) * a_s * b_s).type(self.dtype) # TODO: for fp8 quantization, do the actual mul in fp8, accumilate fp32 # TODO: don't hardcode float32. It is needed cause int32 accum > fp16 range
-        a_dq = (a.type(self.dtype) * a_s) @ b_o.expand(k, 1)
-        b_dq = a_o.expand(1, k) @ (b.type(self.dtype) * b_s)
-
-        abo = k * a_o * b_o
-
-        ab = ab_dq + a_dq + b_dq + abo
+        # (a * as) * (b * bs) = (ab)(as*bs)
+        ab = (mul_func(a, b).type(torch.float32) * (a_s * b_s)).type(utils.dtype)
 
         return ab
 
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
 
-    def custom_load(self, weight, key_steps, get_pre_rot, get_post_rot, scale=None, offset=None):
+    def custom_load(self, weight, key_steps: list[str], get_pre_rot, get_post_rot, scale= None):
         try:
             weight = weight.type(self.dtype).T # transpose weights, since the linear layer is y = xA^T
-            pre_rot = get_pre_rot(key_steps)
+
+            self.is_quantized = not (utils.skip_bad_layers and 'w2' in key_steps and utils.weight_check(key_steps, ['21'])) # 2, 4 9? 10? 12? 20? 21! 22nan
+
+            pre_rot = get_pre_rot(key_steps) if self.is_quantized else None # TODO: if other special no quantize cases, modify to work for those
             post_rot = get_post_rot(key_steps)
 
             if pre_rot is not None or post_rot is not None:
@@ -150,25 +137,27 @@ class Linear(Module):
                 if post_rot is not None:
                     weight = weight @ post_rot
             
-            # using gpt8 weights
-            if scale is not None and offset is not None:
-                self.weight_scale = scale.T.to(weight.device)
-                self.weight_offset = offset.T.to(weight.device)
-            elif utils.use_quant_map:
-                # weight = torch.load("map_quant_weights/" + ".".join(key_steps))
-                # weight = weight.cuda()
-                weight = utils.dequantize_cluster(*utils.quantize_cluster(weight)) # TODO: dequant should be done in shared memory live
-                self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device)
-                self.weight_offset = torch.tensor(0, dtype=self.dtype).to(weight.device) # TODO: make optional
-                torch.save(weight, "map_quant_weights_8/" + ".".join(key_steps))
-                print("map quantized", key_steps)
-            # can just cast for basic fp types
-            elif self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-                weight = weight.type(self.qdtype) # .to(torch.get_default_device())
-                self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device)
-                self.weight_offset = torch.tensor(0, dtype=self.dtype).to(weight.device)
-            else:
-                weight, self.weight_scale, self.weight_offset = utils.quantize(weight, self.qdtype) # , torch.get_default_device())
+            if self.is_quantized:
+                # using gpt8 weights
+                if scale is not None:
+                    self.weight_scale = scale.T.to(weight.device)
+                elif utils.use_quant_map:
+                    # weight = torch.load("map_quant_weights/" + ".".join(key_steps))
+                    # weight = weight.cuda()
+                    weight = utils.dequantize_cluster(*utils.quantize_cluster(weight)) # TODO: dequant should be done in shared memory live
+                    self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device) # TODO: make optional
+                    torch.save(weight, "map_quant_weights_8/" + ".".join(key_steps))
+                    print("map quantized", key_steps)
+                # can just cast for basic fp types
+                elif self.qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
+                    weight = weight.type(self.qdtype)
+                    self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device)
+                else:
+                    weight, self.weight_scale = utils.quantize(weight, self.qdtype, dim=-2)
+            
+            temp = torch.zeros((weight.shape[1], weight.shape[0]), dtype=weight.dtype, device=weight.device) # TODO: check if weight always 2D
+            temp = temp.T
+            weight = temp.copy_(weight)
             self.weight = torch.nn.Parameter(weight, requires_grad=False)
         except Exception as e:
             raise Exception(repr(e))

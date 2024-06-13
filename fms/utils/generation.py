@@ -3,6 +3,9 @@ from typing import Any, Callable, List, MutableMapping, Optional, Union
 import torch
 import torch.nn.functional as F
 
+from fms.modules.quarot import utils
+import pickle
+
 
 def _make_cache_contiguous(past_key_value_states):
     # kv updates are required for torch.compile with
@@ -75,7 +78,16 @@ def generate(
     kwargs["past_key_value_states"] = None
     kwargs["use_cache"] = use_cache
 
-    for _ in range(max_new_tokens):
+    # TODO: consider removing or cleaning up (perplexity)
+    chosen_probs = []
+    save_token_ids = []
+    is_truth = utils.qdtype == torch.float16
+    if not is_truth:
+        with open('correct_token_ids.pickle', 'rb') as f:
+            save_token_ids = pickle.load(f)
+            print('loaded truth tokens')
+
+    for i in range(max_new_tokens): # TODO: was _
         input_ids = next_input[:, -max_seq_len:]
         output = model(input_ids, **kwargs)
         if use_cache:
@@ -102,7 +114,20 @@ def generate(
             probs = F.softmax(logits, dim=-1)
             next_val = torch.multinomial(probs, num_samples=1)
         else:
+            # TODO: consider removing or cleaning up (perplexity)
+            probs = F.softmax(logits, dim=-1)
+
             next_val = torch.argmax(logits, dim=-1).unsqueeze(0).t()
+
+        if is_truth:
+            save_token_ids.append(next_val)
+        elif utils.test_against_truth:
+            next_val = save_token_ids[i] # TODO: remove. For testing, this keeps testing preplecity on ground truth tokens
+
+        # TODO: consider removing or cleaning up (perplexity)
+        chosen_probs.append(probs[0, next_val])
+        # print(f"prob {probs[0, next_val]}")
+
 
         result = torch.cat((result, next_val), dim=-1)
 
@@ -116,6 +141,18 @@ def generate(
             next_input = next_val
         else:
             next_input = result
+
+    chosen_probs = torch.tensor(chosen_probs)
+    logs = chosen_probs.log()
+    mean = logs.mean()
+    perp = (-mean).exp()
+
+    print(f"perplexity: {perp}")
+
+    if is_truth:
+        with open('correct_token_ids.pickle', 'wb') as f:
+            pickle.dump(save_token_ids, f)
+            print('saved truth tokens')
 
     if not batched:
         result = result[0]

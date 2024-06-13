@@ -40,15 +40,18 @@ class GatedLinearUnit(nn.Module):
             if self.use_bias:
                 getattr(self, layer).bias.data.zero_()
 
-    # def to_tp(self, group: ProcessGroup) -> "TPGatedLinearUnit":
-    #     return TPGatedLinearUnit.import_module(self, group)
-
     def forward(self, x):
         x = utils.quantize(x, utils.qdtype)
         out = self.a(self.wg(x)) * self.w1(x)
         if self.p_dropout:
             out = self.d(out)
-        out = out @ utils.rots[3][0]
-        out = utils.quantize(out, utils.qdtype)
-        return self.w2(out)
+        if self.w2.is_quantized:
+            out = out @ utils.rots[3][0]
+            out = utils.quantize(out, utils.qdtype)
+        result = self.w2(out)
+        # TODO: remove
+        if utils.temp_layer < 32:
+            print(f"layer {utils.temp_layer:02d} min: {result.min(): 02.4f}, max: {result.max(): 02.4f}, mean mag: {result.abs().mean(): 02.4f}, mean sq mag sqrt (max row): {result.square().mean(dim=1).sqrt().max(): 02.4f}")
+            utils.temp_layer += 1
+        return result
 
