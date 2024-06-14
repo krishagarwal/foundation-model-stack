@@ -80,12 +80,17 @@ def generate(
 
     # TODO: consider removing or cleaning up (perplexity)
     chosen_probs = []
-    save_token_ids = []
+    softmax_dots = []
+    truth_token_ids = []
+    truth_softmax = []
     is_truth = utils.qdtype == torch.float16
     if not is_truth:
         with open('correct_token_ids.pickle', 'rb') as f:
-            save_token_ids = pickle.load(f)
+            truth_token_ids = pickle.load(f)
             print('loaded truth tokens')
+        with open('correct_softmax.pickle', 'rb') as f:
+            truth_softmax = pickle.load(f)
+            print('loaded truth softmax')
 
     for i in range(max_new_tokens): # TODO: was _
         input_ids = next_input[:, -max_seq_len:]
@@ -120,13 +125,15 @@ def generate(
             next_val = torch.argmax(logits, dim=-1).unsqueeze(0).t()
 
         if is_truth:
-            save_token_ids.append(next_val)
+            truth_token_ids.append(next_val)
+            truth_softmax.append(probs.reshape(-1))
         elif utils.test_against_truth:
-            next_val = save_token_ids[i] # TODO: remove. For testing, this keeps testing preplecity on ground truth tokens
+            next_val = truth_token_ids[i] # TODO: remove. For testing, this keeps testing preplecity on ground truth tokens
 
         # TODO: consider removing or cleaning up (perplexity)
         chosen_probs.append(probs[0, next_val])
         # print(f"prob {probs[0, next_val]}")
+        softmax_dots.append(torch.cosine_similarity(probs.reshape(-1).to(torch.float32), truth_softmax[i].to(torch.float32), dim=0))
 
 
         result = torch.cat((result, next_val), dim=-1)
@@ -147,12 +154,19 @@ def generate(
     mean = logs.mean()
     perp = (-mean).exp()
 
-    print(f"perplexity: {perp}")
+    softmax_metric = torch.tensor(softmax_dots).mean()
+
+    print(f"val: {utils.current_float_val}, perplexity: {perp}, softmax metric: {softmax_metric}")
+    utils.current_score = softmax_metric
 
     if is_truth:
         with open('correct_token_ids.pickle', 'wb') as f:
-            pickle.dump(save_token_ids, f)
+            pickle.dump(truth_token_ids, f)
             print('saved truth tokens')
+        with open('correct_softmax.pickle', 'wb') as f:
+            pickle.dump(truth_softmax, f)
+            print('saved truth softmax')
+
 
     if not batched:
         result = result[0]

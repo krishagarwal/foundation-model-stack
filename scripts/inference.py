@@ -12,6 +12,7 @@ from fms.models import get_model
 from fms.utils import generation, tokenizers
 from fms.utils.generation import generate
 from fms.modules.quarot import utils as qutils # TODO: clarify
+import matplotlib.pyplot as plt
 
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
@@ -117,24 +118,28 @@ else:
     else:
         distr_param = None
 
-model = get_model(
-    args.architecture,
-    args.variant,
-    model_path=args.model_path,
-    device_type=args.device_type,
-    source=args.model_source,
-    distributed_strategy=distr_param,
-    group=dist.group.WORLD,
-)
-tokenizer = tokenizers.get_tokenizer(args.tokenizer)
-model.eval()
-torch.set_grad_enabled(False)
-print("loading complete on rank", local_rank)
+def init_model():
+    global model, tokenizer
+    model = get_model(
+        args.architecture,
+        args.variant,
+        model_path=args.model_path,
+        device_type=args.device_type,
+        source=args.model_source,
+        distributed_strategy=distr_param,
+        group=dist.group.WORLD,
+    )
+    tokenizer = tokenizers.get_tokenizer(args.tokenizer)
+    model.eval()
+    torch.set_grad_enabled(False)
+    print("loading complete on rank", local_rank)
 
-if args.compile:
-    print("compiling model")
-    # compiling can make first inference pass slow
-    model = torch.compile(model, mode=args.compile_mode)
+    if args.compile:
+        print("compiling model")
+        # compiling can make first inference pass slow
+        model = torch.compile(model, mode=args.compile_mode)
+
+init_model()
 
 
 def ids_for_prompt(prompt):
@@ -172,7 +177,7 @@ else:
     prompt1 = template.format(
         "Provide a list of instructions for preparing chicken soup."
     )
-    prompt2 = template.format("Explain some popular greetings in Spanish.")
+    prompt2 = template.format("What's ELI5?") #"Explain some popular greetings in Spanish.")
 
 prompt1 = ids_for_prompt(prompt1)
 prompt2 = ids_for_prompt(prompt2)
@@ -184,7 +189,7 @@ max_len = max([len(prompt) for prompt in [prompt1, prompt2]])
 # prompt2 = pad_prompt(prompt2, max_len)
 # ids = torch.stack((prompt2, prompt1), dim=0)
 
-ids = prompt1.unsqueeze(0) # TODO: revert to prompt 1 (change for testing)
+ids = prompt2.unsqueeze(0) # TODO: revert to prompt 1 (change for testing)
 
 
 def print_result(result):
@@ -196,6 +201,7 @@ def print_result(result):
     )
     # print(result)
     # print(tokenizer.convert_ids_to_tokens(result))
+    result = torch.where(result < 32000, result, 0) # TODO: fix sentencepiece to allow 32008 vocab
     print(tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(result)))
     print()
 
@@ -213,16 +219,49 @@ def infer(use_cache, do_sample):
         # without ntk scaling, extending the seq length too far gives bogus results.
         max_seq_len = model.config.max_expected_seq_len
 
-    result = generate(
-        model,
-        ids,
-        max_new_tokens=100,
-        use_cache=use_cache,
-        do_sample=do_sample,
-        max_seq_len=max_seq_len,
-    )
-    for i in range(result.shape[0]):
-        print_result(result[i])
+    if qutils.test_against_truth and qutils.qdtype != torch.float16:
+        vals = []
+        scores = []
+        for i in range(qutils.test_float_vals):
+            if i != 0:
+                init_model()
+
+            lerpval = i / (qutils.test_float_vals - 1) if qutils.test_float_vals != 1 else 0
+            val = qutils.test_float_range[0] + lerpval * (qutils.test_float_range[1] - qutils.test_float_range[0])
+            qutils.current_float_val = val
+            result = generate(
+                model,
+                ids,
+                max_new_tokens=100,
+                use_cache=use_cache,
+                do_sample=do_sample,
+                max_seq_len=max_seq_len,
+            )
+            vals.append(val)
+            if torch.isnan(qutils.current_score): # nan
+                qutils.current_score = 1.05 # can't be above 1, so we know it's nan
+            scores.append(qutils.current_score)
+        for i in range(result.shape[0]):
+            print_result(result[i])
+
+        plt.plot(vals, scores)
+        plt.xlabel('scale factor')
+        plt.ylabel('cossim score')
+        plt.xticks([v for i, v in enumerate(vals) if scores[i] != 1.05])
+        plt.show()
+        plt.savefig('fp8 cossim vs scale factor.png')
+        
+    else:
+        result = generate(
+            model,
+            ids,
+            max_new_tokens=100,
+            use_cache=use_cache,
+            do_sample=do_sample,
+            max_seq_len=max_seq_len,
+        )
+        for i in range(result.shape[0]):
+            print_result(result[i])
 
 
 print("generating output", local_rank)

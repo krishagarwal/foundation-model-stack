@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 import math
 from . import utils
+from . import mmul_triton
 
 
 class Linear(Module):
@@ -88,7 +89,7 @@ class Linear(Module):
 
             # TODO: has strange restrictions, optimize (e.g. can we avoid requiring 17 leading dimension? we usually use only 1)
             # TODO: check what amax _ is
-            temp, _ = torch._scaled_mm(a_part, b) # a_part, b, out=temp)
+            temp, _ = torch._scaled_mm(a_part, b, out_dtype=utils.accdtype) # a_part, b, out=temp)
 
             # if a.shape[1] < 17:
             temp = temp[:a.shape[1]]
@@ -98,6 +99,11 @@ class Linear(Module):
 
     def basic_mmul(self, a: Tensor, b: Tensor):
         return a.type(utils.accdtype) @ b.type(utils.accdtype)
+
+    def fp8_mmul_triton(self, a: Tensor, b: Tensor):
+        target_shape = (*a.shape[:-1], b.shape[-1])
+        # concat batches of a into rows, then back
+        return mmul_triton.matmul(a.view(-1, a.shape[-1]), b).view(target_shape)
 
     def forward(self, input) -> Tensor:
         # return F.linear(input, self.weight, self.bias)
@@ -111,11 +117,13 @@ class Linear(Module):
         a, a_s = input, input_scale.type(self.dtype)
         b, b_s = self.weight, self.weight_scale
 
-        mul_func = self.int_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.fp8_mmul if self.qdtype in [torch.float8_e4m3fn] else self.basic_mmul
+        #self.fp8_mmul
+        mul_func = self.int_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.fp8_mmul_triton if self.qdtype in [torch.float8_e4m3fn] else self.basic_mmul
 
         # a * b = c
         # (a * as) * (b * bs) = (ab)(as*bs)
-        ab = (mul_func(a, b).type(torch.float32) * (a_s * b_s)).type(utils.dtype)
+        # TODO: check efficiency, had to change order so scale didn't reach inf
+        ab = ((mul_func(a, b).type(torch.float32) * a_s) * b_s).type(utils.dtype)
 
         return ab
 

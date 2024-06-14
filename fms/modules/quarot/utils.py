@@ -5,13 +5,16 @@ import random
 from kmeans_gpu import KMeans
 
 dtype    = torch.float16
-qdtype   = torch.float8_e4m3fn # int8  #_e5m2
+qdtype   = torch.float8_e4m3fn # 16 # int8  #_e5m2
 accdtype = torch.float16 # int32
 use_quant_map = False
 skip_bad_layers = False
-test_against_truth = True
-test_float_range = (0.1, 2)# None
-test_float_vals = 5
+test_against_truth = False
+test_float_range = (1, 100) #(0.01, 6)# None
+test_float_vals = 1
+current_float_val = test_float_range[0]
+current_score = 0
+use_hadamard_not_eye = False
 
 temp_layer = 0
 
@@ -23,7 +26,8 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None) -> tuple[torch.T
     if qdtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
         # temp, _ = weight.abs().max(dim=dim, keepdim=True)
         # temp = 1#2.4
-        temp = torch.sqrt(torch.tensor(65504 * 0.7 / weight.shape[dim]))
+        # temp = current_float_val
+        temp = torch.sqrt(torch.tensor(65504 * current_float_val / weight.shape[dim]))
         scale_max = torch.tensor(temp).to(weight.device, dtype=dtype)
         # return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device)
         # scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
@@ -143,9 +147,11 @@ ln_ffn = ['error'] * 32
 rots = []
 sizes = [4096, 128, 128, 11008]
 for size in sizes:
-    rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
-    # r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
-    # rots.append((r, r_inv))
+    if not use_hadamard_not_eye:
+        rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
+    else:
+        r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
+        rots.append((r, r_inv))
     # rots.append((r, r.T))
 
 # idx = 1

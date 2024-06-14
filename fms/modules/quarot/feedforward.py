@@ -49,9 +49,9 @@ class GatedLinearUnit(nn.Module):
             out = out @ utils.rots[3][0]
             out = utils.quantize(out, utils.qdtype)
         result = self.w2(out)
-        # TODO: remove
-        if utils.temp_layer < 32:
-            print(f"layer {utils.temp_layer:02d} min: {result.min(): 02.4f}, max: {result.max(): 02.4f}, mean mag: {result.abs().mean(): 02.4f}, mean sq mag sqrt (max row): {result.square().mean(dim=1).sqrt().max(): 02.4f}")
-            utils.temp_layer += 1
+        # # TODO: remove
+        # if utils.temp_layer < 32:
+        #     print(f"layer {utils.temp_layer:02d} min: {result.min(): 02.4f}, max: {result.max(): 02.4f}, mean mag: {result.abs().mean(): 02.4f}, mean sq mag sqrt (max row): {result.square().mean(dim=1).sqrt().max(): 02.4f}")
+        #     utils.temp_layer += 1
         return result
 
