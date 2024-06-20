@@ -415,7 +415,7 @@ models.register_model(_architecture_name, "7b", _llama_factory_factory(_7b_confi
 models.register_model(_architecture_name, "13b", _llama_factory_factory(_13b_config))
 models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_config))
 
-granite_7b_config = LLaMAConfig(src_vocab_size=32008)
+granite_7b_config = LLaMAConfig(src_vocab_size=32008, max_expected_seq_len=2048)
 models.register_model(_architecture_name, "granite_7b", _llama_factory_factory(granite_7b_config))
 
 

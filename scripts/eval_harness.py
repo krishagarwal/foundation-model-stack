@@ -6,6 +6,7 @@ import torch
 import torch._inductor.config
 from lm_eval.utils import make_table
 from torch import distributed as dist
+from fms.modules.quarot import utils
 
 from fms.models import get_model
 from fms.utils import evaluation, tokenizers
@@ -119,6 +120,7 @@ else:
     else:
         distr_param = None
 
+utils.init(device)
 model = get_model(
     args.architecture,
     args.variant,
@@ -143,12 +145,13 @@ if args.compile:
 
 lm_obj = evaluation.FMSEvalHarnessLM(model=model, tokenizer=tokenizer, device=device)
 
-lm_eval.tasks.initialize_tasks()
+task_manager = lm_eval.tasks.TaskManager()
 
 results = lm_eval.simple_evaluate(
     model=lm_obj,
     tasks=args.tasks.split(","),
     num_fewshot=args.num_fewshot,
+    task_manager=task_manager
 )
 print(make_table(results))
 if "groups" in results:

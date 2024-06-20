@@ -195,5 +195,3 @@ def matmul(a, b):
         # ACTIVATION=activation  #
     )
     return c
-
-print("hi")

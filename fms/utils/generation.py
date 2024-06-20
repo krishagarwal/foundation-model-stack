@@ -84,7 +84,7 @@ def generate(
     truth_token_ids = []
     truth_softmax = []
     is_truth = utils.qdtype == torch.float16
-    if not is_truth:
+    if not is_truth and utils.test_against_truth:
         with open('correct_token_ids.pickle', 'rb') as f:
             truth_token_ids = pickle.load(f)
             print('loaded truth tokens')
@@ -129,13 +129,10 @@ def generate(
             truth_softmax.append(probs.reshape(-1))
         elif utils.test_against_truth:
             next_val = truth_token_ids[i] # TODO: remove. For testing, this keeps testing preplecity on ground truth tokens
+            softmax_dots.append(torch.cosine_similarity(probs.reshape(-1).to(torch.float32), truth_softmax[i].to(torch.float32), dim=0))
 
         # TODO: consider removing or cleaning up (perplexity)
         chosen_probs.append(probs[0, next_val])
-        # print(f"prob {probs[0, next_val]}")
-        softmax_dots.append(torch.cosine_similarity(probs.reshape(-1).to(torch.float32), truth_softmax[i].to(torch.float32), dim=0))
-
-
         result = torch.cat((result, next_val), dim=-1)
 
         # avoid continuing to generate if all have reached EOS
@@ -153,13 +150,13 @@ def generate(
     logs = chosen_probs.log()
     mean = logs.mean()
     perp = (-mean).exp()
-
-    softmax_metric = torch.tensor(softmax_dots).mean()
+    
+    softmax_metric = torch.tensor(softmax_dots).mean() if utils.test_against_truth else None
 
     print(f"val: {utils.current_float_val}, perplexity: {perp}, softmax metric: {softmax_metric}")
     utils.current_score = softmax_metric
 
-    if is_truth:
+    if is_truth and utils.test_against_truth:
         with open('correct_token_ids.pickle', 'wb') as f:
             pickle.dump(truth_token_ids, f)
             print('saved truth tokens')
