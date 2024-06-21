@@ -50,25 +50,17 @@ class FMSEvalHarnessLM(LM):
             input_ids, dtype=torch.long, device=self.device
         ).unsqueeze(0).cuda()
 
-        curr_cache = None
         logits = None
         for i in range(0, input_ids.shape[1], max_len):
-            cache_len = curr_cache[0][0].shape[2] if curr_cache is not None else 0
-            if cache_len >= max_len:
-                curr_cache = [(layer_keys[:, :, -max_len+1:], layer_vals[:, :, -max_len+1:]) for layer_keys, layer_vals in curr_cache]
-                cache_len = curr_cache[0][0].shape[2]
+            out_len = max_len
+            if i + max_len > input_ids.shape[1]:
+                curr_tokens = input_ids[:, -max_len:]
+                out_len = input_ids.shape[1] - i
+            else:
+                curr_tokens = input_ids[:, i : i + max_len]
             
-            curr_tokens = input_ids[:, i : min(input_ids.shape[1], i + max_len)]
-            input_len = curr_tokens.shape[1]
-
-            total_len = cache_len + input_len
-            assert total_len < 2 * max_len
-            i_range = torch.arange(cache_len, total_len).view(-1, 1)
-            j_range = torch.arange(0, total_len).view(1, -1)
-            mask = ((j_range <= i_range) & (j_range > i_range - max_len)).to(input_ids.device).broadcast_to(1, 32, input_len, total_len)
-
-            model_out, curr_cache = self.wrapped_model(curr_tokens, use_cache=True, past_key_value_states=curr_cache, mask=mask)
-            curr_logits = F.log_softmax(model_out[0], -1).cpu()
+            model_out = self.wrapped_model(curr_tokens)
+            curr_logits = F.log_softmax(model_out[0][-out_len:], -1).cpu()
             logits = curr_logits if logits is None else torch.cat([logits, curr_logits], dim=0)
 
         continuation_probs = logits[len(context_ids) - 1:, :]
@@ -89,13 +81,11 @@ class FMSEvalHarnessLM(LM):
     def loglikelihood_rolling(
         self, requests: List[Instance]
     ) -> List[Tuple[float, bool]]:
-        # TODO: check implementation
         result = []
         for request in tqdm(requests):
             continuation = request.args[0]
             result.append(self.loglikelihood_one("", continuation)[0])
         return result
-        raise NotImplementedError("not implemented yet")
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         raise NotImplementedError("not implemented yet")
