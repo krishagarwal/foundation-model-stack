@@ -125,7 +125,7 @@ class RotaryEmbedding(PositionEncoder):
         self.cached_freqs: MutableMapping[int, MutableMapping[int, torch.Tensor]] = {}
         self.max_seq_len_cached: MutableMapping[int, int] = {}
         self.ntk_scaling = ntk_scaling
-        self.max_seq_len = max_seq_len
+        self.max_seq_len = max_seq_len * 16 # TODO: remove
 
     def _alpha(self, seq_len) -> int:
         if not self.ntk_scaling:

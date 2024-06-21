@@ -43,11 +43,18 @@ class FMSEvalHarnessLM(LM):
             self.tokenizer.tokenize(continuation)
         )
         input_ids = context_ids + continuation_ids[:-1]
+        input_len = len(input_ids)
         input_ids = torch.tensor(
             input_ids, dtype=torch.long, device=self.device
         ).unsqueeze(0)
-        logits = F.log_softmax(self.wrapped_model(input_ids)[0], -1)
-        continuation_probs = logits[len(context_ids) - 1 :]
+
+        i_range = torch.arange(0, input_len).view(-1, 1)
+        j_range = torch.arange(0, input_len).view(1, -1)
+        mask = torch.where((j_range <= i_range) & (i_range < j_range + self.wrapped_model.config.max_expected_seq_len), 0, -torch.inf).to(input_ids.device)
+        mask = mask.broadcast_to(1, 32, input_len, input_len)
+
+        logits = F.log_softmax(self.wrapped_model(input_ids, mask=mask)[0], -1)
+        continuation_probs = logits[len(context_ids) - 1 :].cpu()
         loglikelihood = torch.gather(
             continuation_probs, 1, torch.tensor(continuation_ids).unsqueeze(1)
         ).squeeze()
@@ -63,9 +70,15 @@ class FMSEvalHarnessLM(LM):
         return result
 
     def loglikelihood_rolling(
-        self, requests: List[Instance]
-    ) -> List[Tuple[float, bool]]:
-        raise NotImplementedError("not implemented yet")
+            self, requests: List[Instance]
+        ) -> List[Tuple[float, bool]]:
+            # TODO: check implementation
+            result = []
+            for request in requests:
+                continuation = request.args[0]
+                result.append(self.loglikelihood_one("<|endoftext|>", continuation)[0])
+            return result
+            raise NotImplementedError("not implemented yet")
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         raise NotImplementedError("not implemented yet")
