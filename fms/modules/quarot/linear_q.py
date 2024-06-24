@@ -3,7 +3,6 @@ from torch import Tensor
 from torch.nn import init
 from torch.nn import Module
 from torch.nn.parameter import Parameter
-import torch.nn.functional as F
 
 import math
 from . import utils
@@ -27,7 +26,7 @@ class Linear(Module):
         self.dtype = dtype
         self.accdtype = accdtype
         self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs))
-        self.is_quantized = True
+        self.is_no_quant_layer = False
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -107,7 +106,7 @@ class Linear(Module):
 
     def forward(self, input) -> Tensor:
         # return F.linear(input, self.weight, self.bias)
-        if not self.is_quantized: # input will be Tensor
+        if self.is_no_quant_layer: # input will be Tensor
             return self.basic_mmul(input, self.weight)
         
         # input is tuple if quantized
@@ -130,22 +129,18 @@ class Linear(Module):
     def extra_repr(self) -> str:
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
 
-    def custom_load(self, weight, key_steps: list[str], get_pre_rot, get_post_rot, scale= None):
+    def custom_load(self, weight, key_steps: list[str], apply_pre_rot, apply_post_rot, scale= None):
         try:
             weight = weight.type(self.dtype).T # transpose weights, since the linear layer is y = xA^T
 
-            self.is_quantized = not (utils.skip_bad_layers and 'w2' in key_steps and utils.weight_check(key_steps, ['21'])) # 2, 4 9? 10? 12? 20? 21! 22nan
+            self.is_no_quant_layer = (utils.skip_bad_layers and 'w2' in key_steps and utils.weight_check(key_steps, ['21'])) # 2, 4 9? 10? 12? 20? 21! 22nan
 
-            pre_rot = get_pre_rot(key_steps) if self.is_quantized else None # TODO: if other special no quantize cases, modify to work for those
-            post_rot = get_post_rot(key_steps)
-
-            if pre_rot is not None or post_rot is not None:
-                if pre_rot is not None:
-                    weight = pre_rot @ weight
-                if post_rot is not None:
-                    weight = weight @ post_rot
+            # TODO: if other special no quantize cases, modify to work for those (NOTE: only works for down projection)
+            if not self.is_no_quant_layer:
+                weight = apply_pre_rot(key_steps, weight)
+            weight = apply_post_rot(key_steps, weight)
             
-            if self.is_quantized:
+            if not self.is_no_quant_layer:
                 # using gpt8 weights
                 if scale is not None:
                     self.weight_scale = scale.T.to(weight.device)

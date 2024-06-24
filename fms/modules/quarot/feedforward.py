@@ -45,8 +45,9 @@ class GatedLinearUnit(nn.Module):
         out = self.a(self.wg(x)) * self.w1(x)
         if self.p_dropout:
             out = self.d(out)
-        if self.w2.is_quantized:
-            out = out @ utils.rots[3][0]
+        if not self.w2.is_no_quant_layer:
+            if utils.use_hadamard: # TODO: this is fix to make sure no rotations happen when we skip quantizing a down proj layer
+                out = out @ utils.rots[3][0]
             out = utils.quantize(out, utils.qdtype)
         result = self.w2(out)
         # # TODO: remove

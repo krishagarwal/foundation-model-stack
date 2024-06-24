@@ -276,8 +276,12 @@ class MultiHeadAttention(nn.Module):
         keys = keys.transpose(2, 1)  # / (self.emb_kq_per_head**(1/4))
         values = values.transpose(2, 1)  # compatible with QK.T
 
-        queries = queries @ utils.rots[2][0]
-        keys = keys @ utils.rots[2][1].T
+        if utils.use_hadamard:
+            # queries = queries @ utils.rots[2][0]
+            # keys = keys @ utils.rots[2][1].T
+            # TODO: queries/keys shape is (b, n_head, q_len, m) after transpose in right_had, stride is (b*n_head*q_len*m, q_len, 1, q_len*n_head) which messes up fast had transform code
+            queries = utils.right_had(queries)
+            keys = utils.right_had(keys)
 
         # TODO: kv cache quantization
         # if you want to use caching and past_key_value_state is not None meaning you have values in your cache

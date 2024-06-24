@@ -1,8 +1,8 @@
-import math
 import torch
 from scipy.linalg import hadamard
 import random
 from kmeans_gpu import KMeans
+from .fast_had_trans import triton_fast_had
 
 dtype    = torch.float16
 qdtype   = torch.float8_e4m3fn # 16 # int8  #_e5m2
@@ -14,7 +14,7 @@ test_float_range = (1, 100) #(0.01, 6)# None
 test_float_vals = 1
 current_float_val = test_float_range[0]
 current_score = 0
-use_hadamard_not_eye = False
+use_hadamard = True
 
 temp_layer = 0
 
@@ -27,8 +27,9 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None) -> tuple[torch.T
         # temp, _ = weight.abs().max(dim=dim, keepdim=True)
         # temp = 1#2.4
         # temp = current_float_val
+        # temp = torch.tensor(temp)
         temp = torch.sqrt(torch.tensor(65504 * current_float_val / weight.shape[dim]))
-        scale_max = torch.tensor(temp).to(weight.device, dtype=dtype)
+        scale_max = temp.to(weight.device, dtype=dtype)
         # return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device)
         # scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.int8, torch.int16]:
@@ -147,7 +148,7 @@ ln_ffn = ['error'] * 32
 rots = []
 sizes = [4096, 128, 128, 11008]
 for size in sizes:
-    if not use_hadamard_not_eye:
+    if not use_hadamard:
         rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
     else:
         r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
@@ -170,27 +171,59 @@ def weight_check(key_steps, targets):
         targets = [targets]
     return len(set(key_steps).intersection(targets)) > 0
 
-def get_pre_rot(key_steps):
-    if weight_check(key_steps, ['wg', 'w1']):
-        return rots[0][1] @ torch.diag(ln_ffn[int(key_steps[1])].type(dtype)) #.view(1, -1).type(dtype) # [2] is the block number
-    if weight_check(key_steps, 'w2'):
-        return rots[3][1]
-    if weight_check(key_steps, ['query', 'key', 'value']):
-        return rots[0][1] @ torch.diag(ln_attn[int(key_steps[1])].type(dtype)) #.view(1, -1).type(dtype) # will brodcast across columns, equivalent of a diagonal matrix
-    if weight_check(key_steps, 'dense'):
-        return rots[1][1]
-    else:
-        return None
+# def get_pre_rot(key_steps):
+#     if weight_check(key_steps, ['wg', 'w1']):
+#         return rots[0][1] @ torch.diag(ln_ffn[int(key_steps[1])].type(dtype)) #.view(1, -1).type(dtype) # [2] is the block number
+#     if weight_check(key_steps, 'w2'):
+#         return rots[3][1]
+#     if weight_check(key_steps, ['query', 'key', 'value']):
+#         return rots[0][1] @ torch.diag(ln_attn[int(key_steps[1])].type(dtype)) #.view(1, -1).type(dtype) # will brodcast across columns, equivalent of a diagonal matrix
+#     if weight_check(key_steps, 'dense'):
+#         return rots[1][1]
+#     else:
+#         return None
 
-def get_post_rot(key_steps):
-    if weight_check(key_steps, 'dense'):
-        return rots[0][0]
-    if weight_check(key_steps, 'value'):
-        return rots[1][0]
+# def get_post_rot(key_steps):
+#     if weight_check(key_steps, 'dense'):
+#         return rots[0][0]
+#     if weight_check(key_steps, 'value'):
+#         return rots[1][0]
+#     if weight_check(key_steps, 'w2'):
+#         return rots[0][0]
+#     else:
+#         return None
+
+def right_had(a, had_size=None):
+    return triton_fast_had(a.transpose(-2, -1), had_size=had_size).transpose(-2, -1)
+
+def apply_pre_rot(key_steps, a):
+    if weight_check(key_steps, ['wg', 'w1']):
+        a = torch.diag(ln_ffn[int(key_steps[1])].type(dtype)) @ a # [2] is the block number
+    elif weight_check(key_steps, ['query', 'key', 'value']):
+        a = torch.diag(ln_attn[int(key_steps[1])].type(dtype)) @ a # will brodcast across columns, equivalent of a diagonal matrix
+
+    if not use_hadamard:
+        return a
+    if weight_check(key_steps, ['wg', 'w1']):
+        return rots[0][1] @ a # triton_fast_had(a) # TODO: optimize and add back in
     if weight_check(key_steps, 'w2'):
-        return rots[0][0]
-    else:
-        return None
+        return rots[3][1] @ a
+    if weight_check(key_steps, ['query', 'key', 'value']):
+        return rots[0][1] @ a # triton_fast_had(a) # 
+    if weight_check(key_steps, 'dense'):
+        return rots[1][1] @ a # triton_fast_had(a, had_size=128) # 
+    return a
+
+def apply_post_rot(key_steps, a):
+    if not use_hadamard:
+        return a
+    if weight_check(key_steps, 'dense'):
+        return a @ rots[0][0] # right_had(a) # 
+    if weight_check(key_steps, 'value'):
+        return a @ rots[1][0] # right_had(a, had_size=128) # 
+    if weight_check(key_steps, 'w2'):
+        return a @ rots[0][0] # right_had(a) # 
+    return a
 
 def quantize_cluster(weights: torch.Tensor):
     temp_device = weights.device

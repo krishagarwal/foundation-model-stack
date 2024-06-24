@@ -117,15 +117,11 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
             qkv_unfused = [orig_sd.pop(w).type(utils.dtype) for w in unfused_weights]
             for i, name in enumerate(unfused_weights):
                 name = name.split('.')
-                pre_rot = utils.get_pre_rot(name) # TODO: move to load partial state dict
-                post_rot = utils.get_post_rot(name)
-                if pre_rot is not None or post_rot is not None:
-                    temp = qkv_unfused[i].T # .to(torch.get_default_device())
-                    if pre_rot is not None:
-                        temp = (pre_rot @ temp)
-                    if post_rot is not None:
-                        temp = (temp @ post_rot)
-                    qkv_unfused[i] = temp.T
+                # if pre_rot is not None or post_rot is not None: # TODO: see if removing this makes it slow due to inefficient transposes
+                temp = qkv_unfused[i].T
+                temp = utils.apply_pre_rot(name, temp)
+                temp = utils.apply_post_rot(name, temp)
+                qkv_unfused[i] = temp.T
             new_sd[new_name] = torch.cat(
                 qkv_unfused, dim=0
             )
@@ -475,7 +471,7 @@ def _load_partial_state_dict(
                 if load_func is not None and callable(load_func):
                     prefix = ".".join(key_steps[:-2])
                     scale = state_dict.get(prefix + ".scales")
-                    load_func(tensor_value, key_steps, utils.get_pre_rot, utils.get_post_rot, scale)
+                    load_func(tensor_value, key_steps, utils.apply_pre_rot, utils.apply_post_rot, scale)
                 else:
                     param = getattr(target_module, key_steps[-1])
                     if utils.weight_check(key_steps, ['ln', 'ff_ln']):

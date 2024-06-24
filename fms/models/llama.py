@@ -322,7 +322,8 @@ class LLaMA(nn.Module):
             is_causal_mask = False
 
         x_in = self.shared(x_in)
-        x_in = x_in.type(utils.dtype) @ utils.rots[0][0] # TODO: maybe remove typecast eventually
+        if utils.use_hadamard:
+            x_in = utils.right_had(x_in.type(utils.dtype)) # x_in.type(utils.dtype) @ utils.rots[0][0] # TODO: maybe remove typecast eventually
 
         # this is the output cache for all the decoder layers
         present_key_value_states = []
@@ -347,7 +348,8 @@ class LLaMA(nn.Module):
 
         dec_out = x_in
         # TODO: optimization: include in W_head
-        dec_out = dec_out @ utils.rots[0][1]
+        if utils.use_hadamard:
+            dec_out = utils.right_had(dec_out) # dec_out @ utils.rots[0][1]
         dec_out = self.dec_norm(dec_out)
         if self.config.p_dropout:
             dec_out = self.dropout(dec_out)
