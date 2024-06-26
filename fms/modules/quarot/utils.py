@@ -5,7 +5,7 @@ from kmeans_gpu import KMeans
 from .fast_had_trans import triton_fast_had
 
 dtype    = torch.float16
-qdtype   = torch.float8_e4m3fn # 16 # int8  #_e5m2
+qdtype   = torch.float16 # 8_e4m3fn # 16 # int8  #_e5m2
 accdtype = torch.float16 # int32
 use_quant_map = False
 skip_bad_layers = False
@@ -144,6 +144,7 @@ def random_rotation_almost_hadamard(size: int, use_hardcoded, run_full_orthogona
 
 ln_attn = ['error'] * 32
 ln_ffn = ['error'] * 32
+dec_norm_weight = 'error'
 
 rots = []
 sizes = [4096, 128, 128, 11008]
@@ -201,28 +202,30 @@ def apply_pre_rot(key_steps, a):
         a = torch.diag(ln_ffn[int(key_steps[1])].type(dtype)) @ a # [2] is the block number
     elif weight_check(key_steps, ['query', 'key', 'value']):
         a = torch.diag(ln_attn[int(key_steps[1])].type(dtype)) @ a # will brodcast across columns, equivalent of a diagonal matrix
+    elif weight_check(key_steps, 'head'):
+        a = torch.diag(dec_norm_weight).type(dtype) @ a
 
     if not use_hadamard:
         return a
-    if weight_check(key_steps, ['wg', 'w1']):
-        return rots[0][1] @ a # triton_fast_had(a) # TODO: optimize and add back in
+    if weight_check(key_steps, ['wg', 'w1', 'head']):
+        return triton_fast_had(a) # rots[0][1] @ a
     if weight_check(key_steps, 'w2'):
-        return rots[3][1] @ a
+        return triton_fast_had(a, had_size=256) # rots[3][1] @ a # TODO: don't hardcode
     if weight_check(key_steps, ['query', 'key', 'value']):
-        return rots[0][1] @ a # triton_fast_had(a) # 
+        return triton_fast_had(a) # rots[0][1] @ a
     if weight_check(key_steps, 'dense'):
-        return rots[1][1] @ a # triton_fast_had(a, had_size=128) # 
+        return triton_fast_had(a, had_size=128) # rots[1][1] @ a # TODO: don't hardcode
     return a
 
 def apply_post_rot(key_steps, a):
     if not use_hadamard:
         return a
-    if weight_check(key_steps, 'dense'):
-        return a @ rots[0][0] # right_had(a) # 
+    if weight_check(key_steps, ['dense', 'emb']):
+        return right_had(a) # a @ rots[0][0]
     if weight_check(key_steps, 'value'):
-        return a @ rots[1][0] # right_had(a, had_size=128) # 
+        return right_had(a, had_size=128) # a @ rots[1][0] # TODO: don't hardcode
     if weight_check(key_steps, 'w2'):
-        return a @ rots[0][0] # right_had(a) # 
+        return right_had(a) # a @ rots[0][0]
     return a
 
 def quantize_cluster(weights: torch.Tensor):

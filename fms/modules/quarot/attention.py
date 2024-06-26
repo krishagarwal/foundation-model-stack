@@ -277,11 +277,9 @@ class MultiHeadAttention(nn.Module):
         values = values.transpose(2, 1)  # compatible with QK.T
 
         if utils.use_hadamard:
-            # queries = queries @ utils.rots[2][0]
-            # keys = keys @ utils.rots[2][1].T
-            # TODO: queries/keys shape is (b, n_head, q_len, m) after transpose in right_had, stride is (b*n_head*q_len*m, q_len, 1, q_len*n_head) which messes up fast had transform code
-            queries = utils.right_had(queries)
-            keys = utils.right_had(keys)
+            qk_combined = torch.cat([queries, keys], dim=0)
+            qk_combined = utils.right_had(qk_combined)
+            queries, keys = qk_combined.split([queries.shape[0], keys.shape[0]])
 
         # TODO: kv cache quantization
         # if you want to use caching and past_key_value_state is not None meaning you have values in your cache

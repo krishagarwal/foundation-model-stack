@@ -407,6 +407,8 @@ def load_state_dict_into_model(
                     utils.ln_attn[int(key_steps[1])] = psdv.type(utils.dtype) # .to(torch.get_default_device())
                 elif utils.weight_check(key_steps, 'ff_ln'):
                     utils.ln_ffn[int(key_steps[1])] = psdv.type(utils.dtype) # .to(torch.get_default_device())
+                elif utils.weight_check(key_steps, 'dec_norm'):
+                    utils.dec_norm_weight = psdv.type(utils.dtype)
 
             _load_partial_state_dict(model, fms_partial_sd, needs_tp_sharding)
             # Be aggressive in removing weights to save as much memory as possible
@@ -474,7 +476,7 @@ def _load_partial_state_dict(
                     load_func(tensor_value, key_steps, utils.apply_pre_rot, utils.apply_post_rot, scale)
                 else:
                     param = getattr(target_module, key_steps[-1])
-                    if utils.weight_check(key_steps, ['ln', 'ff_ln']):
+                    if utils.weight_check(key_steps, ['ln', 'ff_ln', 'dec_norm']):
                         # utils.ln_attn[int(key_steps[1])] = tensor_value
                         param.copy_(torch.ones_like(tensor_value), non_blocking=True)
                     # elif utils.weight_check(key_steps, 'ff_ln'):

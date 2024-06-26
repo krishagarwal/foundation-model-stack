@@ -13,6 +13,7 @@ from fms.utils import generation, tokenizers
 from fms.utils.generation import generate
 from fms.modules.quarot import utils as qutils # TODO: clarify
 import matplotlib.pyplot as plt
+import time
 
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
@@ -269,5 +270,9 @@ do_sample = [False]
 use_cache = [
     args.no_use_cache
 ]  # True/False are identical with greedy iff `torch.use_deterministic_algorithms(True)`
+
+before_time = time.time()
 for sample, cache in itertools.product(do_sample, use_cache):
     infer(cache, sample)
+after_time = time.time()
+print(after_time - before_time)
