@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <cuda_runtime.h>
-#include <torch/extension.h>
+// #include <torch/extension.h>
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
 
 #include <cuda_fp16.h>
 
@@ -14,7 +16,7 @@
 template <typename T, uint32_t THREADBLOCK_SIZE_M, uint32_t THREADBLOCK_SIZE_N>
 
 // a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, stride_n, had_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
-__global__ void __launch_bounds__(THREADBLOCK_SIZE_M * THREADBLOCK_SIZE_N, (MAX_WARPS_PER_SM * 32) / (THREADBLOCK_SIZE_M * THREADBLOCK_SIZE_N))
+__global__ void __launch_bounds__(THREADBLOCK_SIZE_M * THREADBLOCK_SIZE_N, std::min(24u, (MAX_WARPS_PER_SM * 32) / (THREADBLOCK_SIZE_M * THREADBLOCK_SIZE_N))) // TODO: don't hardcode
 cuda_fast_had_trans(T* a, uint32_t M, uint32_t N, uint32_t stride_m, uint32_t stride_n, uint32_t had_size)
 {
     __shared__ T chunk[THREADBLOCK_SIZE_N][THREADBLOCK_SIZE_M * 2];
@@ -37,7 +39,7 @@ cuda_fast_had_trans(T* a, uint32_t M, uint32_t N, uint32_t stride_m, uint32_t st
         half y = chunk[threadIdx.y][my_id + h];
         chunk[threadIdx.y][my_id] = (x + y) * ((half)0.7071067811865475);
         chunk[threadIdx.y][my_id + h] = (x - y) * ((half)0.7071067811865475);
-        if (h >= 32)
+        // if (h >= 32)
             __syncthreads();
     }
 
@@ -49,11 +51,15 @@ cuda_fast_had_trans(T* a, uint32_t M, uint32_t N, uint32_t stride_m, uint32_t st
 // template <typename T>
 void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t stride_m, uint32_t stride_n, uint32_t had_size)
 {
-    constexpr uint32_t threadblock_size_n = 8;
-    cuda_fast_had_trans<half, 64, threadblock_size_n><<<dim3(M / (64 * 2), (N + threadblock_size_n - 1) / threadblock_size_n), dim3(64, threadblock_size_n)>>>((half*)a, M, N, stride_m, stride_n, had_size);
+    py::print("hi", true, M, N, stride_m, stride_n, had_size);
+    constexpr uint32_t threadblock_size_n = 2;
+    constexpr uint32_t threadblock_size_m = 128;
+    cuda_fast_had_trans<half, threadblock_size_m, threadblock_size_n><<<dim3(M / (threadblock_size_m * 2), (N + threadblock_size_n - 1) / threadblock_size_n), dim3(threadblock_size_m, threadblock_size_n)>>>((half*)a, M, N, stride_m, stride_n, had_size);
     auto status = cudaDeviceSynchronize();
-    if (status != cudaSuccess)
-        printf(cudaGetErrorString(status));
+    if (status != cudaSuccess) {
+        py::print(cudaGetErrorString(status), true);
+    }
+    py::print("bye", true);
     // return 0;
     // printf("hello yeet");
 }
