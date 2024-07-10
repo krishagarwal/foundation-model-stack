@@ -1,12 +1,12 @@
 import torch
 from scipy.linalg import hadamard
 import random
-from kmeans_gpu import KMeans
-from .fast_had_trans import triton_fast_had
+# from kmeans_gpu import KMeans
+from .fast_had_trans import triton_fast_had, right_had
 
 dtype    = torch.float16
 qdtype   = torch.float16 # 8_e4m3fn # 16 # int8  #_e5m2
-accdtype = torch.float16 # int32
+accdtype = torch.float16 # float16 # int32
 use_quant_map = False
 skip_bad_layers = False
 test_against_truth = False
@@ -15,6 +15,7 @@ test_float_vals = 1
 current_float_val = test_float_range[0]
 current_score = 0
 use_hadamard = True
+use_graph = False # TODO: this is broken
 
 temp_layer = 0
 
@@ -193,9 +194,6 @@ def weight_check(key_steps, targets):
 #         return rots[0][0]
 #     else:
 #         return None
-
-def right_had(a, had_size=None):
-    return triton_fast_had(a.transpose(-2, -1), had_size=had_size).transpose(-2, -1)
 
 def apply_pre_rot(key_steps, a):
     if weight_check(key_steps, ['wg', 'w1']):

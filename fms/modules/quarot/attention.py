@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from fms.modules.positions import PositionEncoder
 
 from . import linear_q, utils
+from . import fast_had_trans
 
 class QKV(nn.Module, metaclass=abc.ABCMeta):
     """Simple module for applying qkv in attention"""
@@ -277,8 +278,11 @@ class MultiHeadAttention(nn.Module):
         values = values.transpose(2, 1)  # compatible with QK.T
 
         if utils.use_hadamard:
+            # use_graph = queries.shape[-2] == 1
+            # queries = fast_had_trans.right_had(queries, use_graph=use_graph)
+            # keys = fast_had_trans.right_had(keys, use_graph=use_graph)
             qk_combined = torch.cat([queries, keys], dim=0)
-            qk_combined = utils.right_had(qk_combined)
+            qk_combined = fast_had_trans.right_had(qk_combined, use_graph=(qk_combined.shape[-2] == 1))
             queries, keys = qk_combined.split([queries.shape[0], keys.shape[0]])
 
         # TODO: kv cache quantization

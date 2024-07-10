@@ -1,0 +1,51 @@
+/usr/local/cuda/include/:/home/intern/miniconda3/envs/myenv/lib/python3.9/site-packages/torch/include/:/home/intern/miniconda3/envs/myenv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include/:/home/intern/miniconda3/envs/myenv/include/python3.9/
+
+CPLUS_INCLUDE_PATH="/usr/local/cuda/include/:/home/intern/miniconda3/envs/myenv/lib/python3.9/site-packages/torch/include/:/home/intern/miniconda3/envs/myenv/lib/python3.9/site-packages/torch/include/torch/csrc/api/include/:/home/intern/miniconda3/envs/myenv/include/python3.9/" g++ -O3 -Wall -shared -std=c++17 -fPIC $(python3 -m pybind11 --includes) test.cpp -o example$(python3-config --extension-suffix) 2> log.txt
+
+CPLUS_INCLUDE_PATH="/usr/local/cuda/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/torch/csrc/api/include/:/home/intern/miniconda3/envs/test/include/python3.9" g++ -O3 -Wall -shared -std=c++17 -fPIC $(python3 -m pybind11 --includes) test.cpp -o example$(python3-config --extension-suffix)
+
+CPLUS_INCLUDE_PATH="/usr/local/cuda/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/torch/csrc/api/include/:/home/intern/miniconda3/envs/test/include/python3.9" nvcc -O3 -shared --compiler-options -fPIC $(python3 -m pybind11 --includes) fast_had_trans.cu -o example$(python3-config --extension-suffix)
+
+CPLUS_INCLUDE_PATH="/usr/local/cuda/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/torch/csrc/api/include/:/home/intern/miniconda3/envs/test/include/python3.9" nvcc -O3 -shared --compiler-options -fPIC $(python3 -m pybind11 --includes) fast_had_trans.cu -o example$(python3-config --extension-suffix)
+
+
+tensor test:
+
+CPLUS_INCLUDE_PATH="/usr/local/cuda/include/" nvcc -O3 fms/modules/quarot/cuda/tensor_16_had.cu -o fms/modules/quarot/cuda/tensor_16_had -arch=sm_89
+
+
+import torch, example, math
+a = torch.ones((128, 128), dtype=torch.float16, device='cuda')
+example.fast_had_trans(a.data_ptr(), a.shape[0], a.shape[1], a.stride()[0], a.stride()[1], a.shape[0])
+h = torch.tensor(scipy.linalg.hadamard(128) / math.sqrt(128), dtype=torch.float16, device='cuda')
+
+
+
+
+
+
+export PYTHONPATH=$PYTHONPATH:`pwd`
+
+granite_7b_config = LLaMAConfig(src_vocab_size=32008)
+models.register_model(_architecture_name, "granite_7b", _llama_factory_factory(granite_7b_config))
+
+/home/intern/miniconda3/envs/myenv/bin/python /home/intern/our-fms/scripts/inference.py --device_type cpu --model_path ../granite-7b-lab/ --tokenizer ../granite-7b-lab/tokenizer.model --variant granite_7b --model_source hf
+
+
+oading model
+loading complete on rank 0
+generating output 0
+use_cache True ;; do_sample False
+==================
+Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+Provide a list of instructions for preparing chicken soup.
+
+### Response:
+
+Certainly! Here are the steps to prepare a delightful chicken soup:
+
+1. **In a large pot, bring water, chopped onions, carrots, and celery to a boil.** Reduce heat and simmer until the vegetables are tender.
+
+2. **Add chopped chicken, chicken broth, and any desired herbs and spices (e.g., bay leaves, thyme, rosem

@@ -5,9 +5,9 @@ import triton
 import triton.language as tl
 import scipy
 import itertools
-from cuda import example
+from .cuda import example
 from fast_hadamard_transform import hadamard_transform
-# from . import utils
+from . import utils
 
 def is_cuda():
     # return triton.runtime.driver.active.get_current_target().backend == "cuda"
@@ -175,7 +175,7 @@ def fast_had_2d_graph_wrapper(a, had_size=None, use_graph=False):
     if had_size is None:
         had_size = a.shape[0]
 
-    if not use_graph:# or not utils.use_graph:
+    if not use_graph or not utils.use_graph:
         return triton_fast_had_2d(a, had_size) # hadamard_transform(a.T.view(a.shape[1], -1, had_size)).view_as(a.T).T / math.sqrt(had_size)
 
     a_key = (tuple(a.shape), had_size)

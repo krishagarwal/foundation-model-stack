@@ -7,8 +7,8 @@ import triton.language as tl
 
 
 def is_cuda():
-    # return triton.runtime.driver.active.get_current_target().backend == "cuda"
-    return triton.runtime.driver.active.get_current_target()[0] == "cuda"
+    return triton.runtime.driver.active.get_current_target().backend == "cuda"
+    # return triton.runtime.driver.active.get_current_target() == "cuda"
     # return isinstance(triton.runtime.driver, triton.runtime.CudaDriver) #triton.runtime.driver.active.get_current_target().backend == "cuda"
 
 def is_hip_mi200():

@@ -7,4 +7,6 @@ fms.egg-info
 */**/*.pyc
 .vscode
 fms.egg-info
-
+*/**/*.so
+*/**/*.*.so
+fms/modules/quarot/cuda/tensor_16_had

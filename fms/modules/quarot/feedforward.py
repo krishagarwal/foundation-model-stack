@@ -1,6 +1,7 @@
 import torch.nn as nn
 from . import linear_q
 from . import utils
+from . import fast_had_trans
 
 class GatedLinearUnit(nn.Module):
 
@@ -48,7 +49,7 @@ class GatedLinearUnit(nn.Module):
         if not self.w2.is_no_quant_layer:
             if utils.use_hadamard: # TODO: this is fix to make sure no rotations happen when we skip quantizing a down proj layer
                 # out = out @ utils.rots[3][0]
-                out = utils.right_had(out, had_size=256) # TODO: don't hardcode
+                out = fast_had_trans.right_had(out, had_size=256, use_graph=(out.shape[-2] == 1)) # TODO: don't hardcode
             out = utils.quantize(out, utils.qdtype)
         result = self.w2(out)
         # # TODO: remove
