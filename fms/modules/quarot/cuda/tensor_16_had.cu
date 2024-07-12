@@ -95,38 +95,56 @@ wmma_ker(half* __restrict__ a, half* __restrict__ hads, uint32_t stride_r, uint3
     
     // Declare the fragments
     // wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> had_frag[2];
-    b32 had_frag[2][4];
+    b32 had_frag[8];
     int remaining_log_had_size2 = log_had_size;
+    // __shared__ b32 shuffle[32 * warps_per_block]; // TODO: consider * 2 because loading 2 hadamards
+    // __shared__ b32 shuffle2[num_chunks][32 * warps_per_block];
     // __shared__ half temp_had[16 * 16 * 2];
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         int c_log_h = min(4, remaining_log_had_size2);
         b32* curr_had = (b32*)&hads[256 * (c_log_h - 1)];
 
-        // int row = (threadid % 4) + (threadid / 16) * 4;//*2 from 32-bit/16-bit
-        // int col = (threadid % 16) / 4;
-        // #pragma unroll
-        // for (int x = 0; x < 2; x++) {
-        //     #pragma unroll
-        //     for (int y = 0; y < 2; y++) {
-        //         b32* a_loc = &((b32*)curr_had)[row + (col + y * 4 + x * 8) * 8];
-        //         asm(
-        //             "ld.global.u32 %0, [%1];\n" : "=r"(had_frag[i][x * 2 + y]) : "l"(a_loc)
-        //         );
-        //     }
-        //     b32 swap = had_frag[i][x * 2 + (threadid < 16)]; // bool acts as 0 or 1 (we are true C++ programmers)
-        //     swap = __shfl_xor_sync(0xFFFFFFFF, swap, 16);
-        //     had_frag[i][x * 2 + (threadid < 16)] = swap;
-        // }
-        
-        int row = threadid / 4;
-        int col = threadid % 4;//*2 from 32-bit/16-bit
+        int col = (threadid % 4) + (threadid / 16) * 4;//*2 from 32-bit/16-bit
+        int row = (threadid % 16) / 4;
         #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            had_frag[i][j] = curr_had[(row + (j % 2) * 8) * 8 + (col + (j / 2) * 4)];
+        for (int x = 0; x < 2; x++) {
+            #pragma unroll
+            for (int y = 0; y < 2; y++) {
+                b32* a_loc = &((b32*)curr_had)[col + (row + y * 4 + x * 8) * 8];
+                asm(
+                    "ld.global.L2::256B.u32 %0, [%1];\n" : "=r"(had_frag[i * 4 + x * 2 + y]) : "l"(a_loc)
+                );
+            }
+            // need ternary operator so that indices are known at compile time
+            // shuffle[threadIdx.x] = threadid < 16 ? had_frag[i * 4 + x * 2 + 1] : had_frag[i * 4 + x * 2 + 0];
+            // if (threadid < 16)
+            //     had_frag[i * 4 + x * 2 + 1] = shuffle[threadIdx.x ^ 16];
+            // else
+            //     had_frag[i * 4 + x * 2 + 0] = shuffle[threadIdx.x ^ 16];
+            b32 swap = threadid < 16 ? had_frag[i * 4 + x * 2 + 1] : had_frag[i * 4 + x * 2 + 0]; // bool acts as 0 or 1 (we are true C++ programmers)
+            swap = __shfl_xor_sync(0xFFFFFFFF, swap, 16);
+            if (threadid < 16)
+                had_frag[i * 4 + x * 2 + 1] = swap;
+            else
+                had_frag[i * 4 + x * 2 + 0] = swap;
         }
-
+        // NOTE: because it's a Walsh matrix, 
+        // [a00, a01] = [a00, a10]
+        // [a10, a11]   [a01, a11]
+        // so the following swap isn't necessary
+        // b32 swap2 = had_frag[i * 4 + 1];
+        // had_frag[i * 4 + 1] = had_frag[i * 4 + 2];
+        // had_frag[i * 4 + 2] = swap2;
         
+        // int row = threadid / 4;
+        // int col = threadid % 4;//*2 from 32-bit/16-bit
+        // #pragma unroll
+        // for (int j = 0; j < 4; j++) {
+        //     had_frag[i * 4 + j] = curr_had[(row + (j % 2) * 8) * 8 + (col + (j / 2) * 4)];
+        // }
+
+
         // wmma::load_matrix_sync(had_frag[i], &hads[256 * (c_log_h - 1)], 16);
         
         remaining_log_had_size2 -= 4;
@@ -162,9 +180,13 @@ wmma_ker(half* __restrict__ a, half* __restrict__ hads, uint32_t stride_r, uint3
                     "ld.global.L2::256B.u32 %0, [%1];\n" : "=r"(b_frag[x * 2 + y]) : "l"(a_loc)
                 );
             }
-            b32 swap = b_frag[x * 2 + (threadid < 16)]; // bool acts as 0 or 1 (we are true C++ programmers)
+            // shuffle2[k][threadIdx.x] = threadid < 16 ? b_frag[x * 2 + 1] : b_frag[x * 2 + 0];
+            b32 swap = threadid < 16 ? b_frag[x * 2 + 1] : b_frag[x * 2 + 0]; // bool acts as 0 or 1 (we are true C++ programmers)
             swap = __shfl_xor_sync(0xFFFFFFFF, swap, 16);
-            b_frag[x * 2 + (threadid < 16)] = swap;
+            if (threadid < 16)
+                b_frag[x * 2 + 1] = swap; //shuffle2[k][threadIdx.x ^ 16];
+            else
+                b_frag[x * 2 + 0] = swap; //shuffle2[k][threadIdx.x ^ 16];
         }
 
         // for (int j = 0; j < 4; j++) {
@@ -192,7 +214,7 @@ wmma_ker(half* __restrict__ a, half* __restrict__ hads, uint32_t stride_r, uint3
             // wmma::mma_sync(c_frag, had_frag[i], b_frag, c_frag);
 
 
-            mma_m16_n16_k16_fp16_fp16_fp16_noacc(had_frag[i][0], had_frag[i][1], had_frag[i][2], had_frag[i][3], b_frag[0], b_frag[1], b_frag[2], b_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3]);
+            mma_m16_n16_k16_fp16_fp16_fp16_noacc(had_frag[i * 4 + 0], had_frag[i * 4 + 1], had_frag[i * 4 + 2], had_frag[i * 4 + 3], b_frag[0], b_frag[1], b_frag[2], b_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3]);
 
 
             remaining_log_had_size -= 4;
@@ -232,7 +254,7 @@ wmma_ker(half* __restrict__ a, half* __restrict__ hads, uint32_t stride_r, uint3
             for (int y = 0; y < 2; y++) {
                 b32* a_loc = &((b32*)a)[row + (col + y * 4 + x * 8) * 8];
                 asm(
-                    "st.global.L1::evict_first.u32 [%0], %1;\n" :: "l"(a_loc), "r"(b_frag[x * 2 + y]) : "memory"
+                    "st.global.L1::evict_first.u32 [%0], %1;\n" :: "l"(a_loc), "r"(b_frag[x * 2 + y]) // : "memory" // NOTE: don't need since writing full cache line and don't access this mem afterward
                 );
             }
         }
@@ -267,7 +289,7 @@ int main()
     uint32_t log_had_size = 8;
     uint32_t cols = 4096 * 16;
     constexpr int chunks_per_warp = 2;
-    constexpr int warps_per_block = 1;
+    constexpr int warps_per_block = 2;
 
     half* ptr = (half*)malloc(vector_size * cols * sizeof(half)); // col major
 
