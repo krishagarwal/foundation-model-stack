@@ -99,8 +99,8 @@ def get_autotune_config():
 # )
 @triton.jit
 def triton_trans(a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, stride_n, h: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
-    pid_0 = tl.program_id(0)
-    pid_1 = tl.program_id(1)
+    pid_0 = tl.program_id(1) # swapped these because of max grid size limit
+    pid_1 = tl.program_id(0)
 
     m_range = tl.arange(0, BLOCK_SIZE_M) + pid_0 * BLOCK_SIZE_M
     n_range = tl.arange(0, BLOCK_SIZE_N) + pid_1 * BLOCK_SIZE_N
@@ -119,8 +119,8 @@ def triton_trans(a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, stride_n, h:
 
 @triton.jit
 def triton_below_1k_trans(a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, stride_n, had_size: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
-    pid_0 = tl.program_id(0)
-    pid_1 = tl.program_id(1)
+    pid_0 = tl.program_id(1) # swapped these because of max grid size limit
+    pid_1 = tl.program_id(0)
 
     m_range = tl.arange(0, BLOCK_SIZE_M) + pid_0 * BLOCK_SIZE_M
     n_range = tl.arange(0, BLOCK_SIZE_N) + pid_1 * BLOCK_SIZE_N
@@ -149,12 +149,12 @@ def triton_below_1k_trans(a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, str
 
 # requires matrix dim 0 is power of 2 and had_size is power of 2
 def triton_fast_had_2d(a, had_size):
-    grid = lambda META: (triton.cdiv(a.shape[0], 2 * META['BLOCK_SIZE_M']), triton.cdiv(a.shape[1], META['BLOCK_SIZE_N']), )
+    grid = lambda META: (triton.cdiv(a.shape[1], META['BLOCK_SIZE_N']), triton.cdiv(a.shape[0], 2 * META['BLOCK_SIZE_M']), )
     if had_size is None:
         had_size = a.shape[0]
 
-    ELEMENTS_PER_THREAD = 4
-    ELEMENTS_PER_BLOCK = 256
+    ELEMENTS_PER_THREAD = 16
+    ELEMENTS_PER_BLOCK = 512
     block_size_m = min(had_size // 2, ELEMENTS_PER_BLOCK)
     block_size_n = ELEMENTS_PER_BLOCK // block_size_m
     h = 2 * block_size_m
@@ -168,7 +168,7 @@ def triton_fast_had_2d(a, had_size):
     return a
 
     # a = hadamard_transform(a.T.view(-1, had_size)).view(*a.shape[::-1]).T / math.sqrt(a.shape[0])
-    return a
+    # return a
 
 cached_pointers = {}
 def fast_had_2d_graph_wrapper(a, had_size=None, use_graph=False):
@@ -183,7 +183,7 @@ def fast_had_2d_graph_wrapper(a, had_size=None, use_graph=False):
         pointer = torch.empty_like(a)
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
-            triton_fast_had_2d(a, had_size)
+            triton_fast_had_2d(pointer, had_size)
             # pointer.copy_(hadamard_transform(pointer.T.view(pointer.shape[1], -1, had_size)).view_as(pointer.T).T)
         cached_pointers[a_key] = (pointer, g)
         
@@ -204,7 +204,7 @@ def right_had(a, had_size=None, use_graph=False):
     res_flat = fast_had_2d_graph_wrapper(a_flat, had_size, use_graph)
     return (res_flat.T.unflatten(0, flats))
 
-def triton_fast_had(a, had_size=None, use_graph=False):
+def left_had(a, had_size=None, use_graph=False):
     if len(a.shape) == 2:
         return fast_had_2d_graph_wrapper(a, had_size, use_graph)
     a = a.transpose(-2, -1)

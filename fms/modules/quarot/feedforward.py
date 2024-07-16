@@ -49,7 +49,8 @@ class GatedLinearUnit(nn.Module):
         if not self.w2.is_no_quant_layer:
             if utils.use_hadamard: # TODO: this is fix to make sure no rotations happen when we skip quantizing a down proj layer
                 # out = out @ utils.rots[3][0]
-                out = fast_had_trans.right_had(out, had_size=256, use_graph=(out.shape[-2] == 1)) # TODO: don't hardcode
+                out = (out.reshape(-1, 172, 64).transpose(-1, -2) @ utils.had172).transpose(-1, -2).reshape_as(out)
+                out = fast_had_trans.right_had(out, had_size=64, use_graph=(out.shape[-2] == 1)) # TODO: don't hardcode
             out = utils.quantize(out, utils.qdtype)
         result = self.w2(out)
         # # TODO: remove

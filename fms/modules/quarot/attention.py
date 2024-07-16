@@ -277,13 +277,13 @@ class MultiHeadAttention(nn.Module):
         keys = keys.transpose(2, 1)  # / (self.emb_kq_per_head**(1/4))
         values = values.transpose(2, 1)  # compatible with QK.T
 
-        if utils.use_hadamard:
-            # use_graph = queries.shape[-2] == 1
+        # if utils.use_hadamard:
+        #     use_graph = queries.shape[-2] == 1
             # queries = fast_had_trans.right_had(queries, use_graph=use_graph)
             # keys = fast_had_trans.right_had(keys, use_graph=use_graph)
-            qk_combined = torch.cat([queries, keys], dim=0)
-            qk_combined = fast_had_trans.right_had(qk_combined, use_graph=(qk_combined.shape[-2] == 1))
-            queries, keys = qk_combined.split([queries.shape[0], keys.shape[0]])
+            # qk_combined = torch.cat([queries, keys], dim=0)
+            # qk_combined = fast_had_trans.right_had(qk_combined, use_graph=(qk_combined.shape[-2] == 1))
+            # queries, keys = qk_combined.split([queries.shape[0], keys.shape[0]])
 
         # TODO: kv cache quantization
         # if you want to use caching and past_key_value_state is not None meaning you have values in your cache
@@ -298,6 +298,18 @@ class MultiHeadAttention(nn.Module):
             else:
                 keys = past_key_value_state[0]
                 values = past_key_value_state[1]
+
+        # TODO: bad way of mimicing kv-cache quantization, also redoing rotations on the past kv-values in the cache which might decrease accuracy
+        if utils.use_hadamard:
+            keys = fast_had_trans.right_had(keys, had_size=128) # TODO: don't hardcode 128
+            values = fast_had_trans.right_had(values, had_size=128)
+        keys, keys_scale = utils.quantize(keys, utils.qdtype)
+        values, values_scale = utils.quantize(values, utils.qdtype)
+        keys = (keys * keys_scale).to(utils.dtype)
+        values = (values * values_scale).to(utils.dtype)
+        if utils.use_hadamard:
+            keys = fast_had_trans.right_had(keys, had_size=128) # TODO: don't hardcode 128
+            values = fast_had_trans.right_had(values, had_size=128)
 
         # Merge rel pos bias and mask into single float mask
         if mask is not None:

@@ -113,7 +113,7 @@ class Linear(Module):
         input, input_scale = input
         assert input.dtype == self.qdtype, f"input: {input.dtype}, self: {self.qdtype}"
         
-        a, a_s = input, input_scale.type(self.dtype)
+        a, a_s = input, input_scale
         b, b_s = self.weight, self.weight_scale
 
         #self.fp8_mmul
@@ -122,7 +122,8 @@ class Linear(Module):
         # a * b = c
         # (a * as) * (b * bs) = (ab)(as*bs)
         # TODO: check efficiency, had to change order so scale didn't reach inf
-        ab = ((mul_func(a, b).type(torch.float32) * a_s) * b_s).type(utils.dtype)
+        # TODO: check if need cast to fp32 after matmul
+        ab = ((mul_func(a, b).to(torch.float32) * a_s) * b_s).type(utils.dtype)
 
         return ab
 
@@ -130,7 +131,7 @@ class Linear(Module):
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}'
 
     def custom_load(self, weight, key_steps: list[str], apply_pre_rot, apply_post_rot, scale= None):
-        try:
+        # try:
             weight = weight.type(self.dtype).T # transpose weights, since the linear layer is y = xA^T
 
             self.is_no_quant_layer = (utils.skip_bad_layers and 'w2' in key_steps and utils.weight_check(key_steps, ['21'])) # 2, 4 9? 10? 12? 20? 21! 22nan
@@ -162,5 +163,5 @@ class Linear(Module):
             temp = temp.T
             weight = temp.copy_(weight)
             self.weight = torch.nn.Parameter(weight, requires_grad=False)
-        except Exception as e:
-            raise Exception(repr(e))
+        # except Exception as e:
+        #     raise Exception(repr(e))

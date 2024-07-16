@@ -2,11 +2,14 @@ import torch
 from scipy.linalg import hadamard
 import random
 # from kmeans_gpu import KMeans
-from .fast_had_trans import triton_fast_had, right_had
+from .fast_had_trans import left_had, right_had
+from .special_had import get_had172
 
-dtype    = torch.float16
-qdtype   = torch.float16 # 8_e4m3fn # 16 # int8  #_e5m2
-accdtype = torch.float16 # float16 # int32
+dtype     = torch.float16
+qdtype    = torch.int8 # float16 # 8_e4m3fn # 16 # int8  #_e5m2
+accdtype  = torch.int32 # float16 # float16 # int32
+scaledtype= torch.float16
+
 use_quant_map = False
 skip_bad_layers = False
 test_against_truth = False
@@ -30,17 +33,18 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None) -> tuple[torch.T
         # temp = current_float_val
         # temp = torch.tensor(temp)
         temp = torch.sqrt(torch.tensor(65504 * current_float_val / weight.shape[dim]))
-        scale_max = temp.to(weight.device, dtype=dtype)
+        scale_max = temp.to(weight.device, dtype=scaledtype)
         # return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device)
         # scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.int8, torch.int16]:
-        scale_max = torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
+        scale_max = torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min().to(weight.device, dtype=scaledtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-        return weight.type(qdtype).to(device), torch.tensor(1, dtype=dtype).to(device)
+        return weight.type(qdtype).to(device), torch.tensor(1, dtype=scaledtype).to(device)
     else:
         raise ValueError("type not supported :(")
 
     mag, _ = weight.abs().max(dim=dim, keepdim=True)
+    mag = mag.to(scaledtype)
     scale = mag / scale_max
     weight = weight / scale
     if qdtype in [torch.int8, torch.int16]:
@@ -167,6 +171,10 @@ def init(device):
     global rots
     for i in range(len(rots)):
         rots[i] = (rots[i][0].to(device), rots[i][1].to(device))
+    global had172
+    had172 = get_had172(device) / torch.sqrt(torch.tensor(172, dtype=torch.float16, device=device))
+    global rand_diag
+    rand_diag = torch.diag(torch.randint(0, 2, (4096,), device=device, dtype=torch.float16) * 2 - 1)
 
 def weight_check(key_steps, targets):
     if isinstance(targets, str):
@@ -206,24 +214,31 @@ def apply_pre_rot(key_steps, a):
     if not use_hadamard:
         return a
     if weight_check(key_steps, ['wg', 'w1', 'head']):
-        return triton_fast_had(a) # rots[0][1] @ a
+        return left_had(rand_diag @ a) # rots[0][1] @ a
     if weight_check(key_steps, 'w2'):
-        return triton_fast_had(a, had_size=256) # rots[3][1] @ a # TODO: don't hardcode
+        rot64 = left_had(a, had_size=64)
+        out = torch.zeros(rot64.shape[::-1], dtype=rot64.dtype, device=rot64.device)
+        out.copy_(rot64.T)
+        out = (out.reshape(-1, 172, 64).transpose(-1, -2) @ had172).transpose(-1, -2).reshape_as(out)
+        rot64.copy_(out.T)
+        return rot64
+        # return (had172 @ rot64.view(64, 172, -1).transpose(0, 1).reshape(172, -1)).view(172, 64, -1).transpose(0, 1).reshape(11008, -1)
+        # return triton_fast_had(a, had_size=256) # rots[3][1] @ a # TODO: don't hardcode
     if weight_check(key_steps, ['query', 'key', 'value']):
-        return triton_fast_had(a) # rots[0][1] @ a
+        return left_had(rand_diag @ a) # rots[0][1] @ a
     if weight_check(key_steps, 'dense'):
-        return triton_fast_had(a, had_size=128) # rots[1][1] @ a # TODO: don't hardcode
+        return left_had(a, had_size=128) # rots[1][1] @ a # TODO: don't hardcode # TODO: bring back rand_diag here
     return a
 
 def apply_post_rot(key_steps, a):
     if not use_hadamard:
         return a
     if weight_check(key_steps, ['dense', 'emb']):
-        return right_had(a) # a @ rots[0][0]
+        return right_had(a @ rand_diag) # a @ rots[0][0]
     if weight_check(key_steps, 'value'):
-        return right_had(a, had_size=128) # a @ rots[1][0] # TODO: don't hardcode
+        return right_had(a, had_size=128) # a @ rots[1][0] # TODO: don't hardcode # TODO: bring back rand_diag here
     if weight_check(key_steps, 'w2'):
-        return right_had(a) # a @ rots[0][0]
+        return right_had(a @ rand_diag) # a @ rots[0][0]
     return a
 
 def quantize_cluster(weights: torch.Tensor):
