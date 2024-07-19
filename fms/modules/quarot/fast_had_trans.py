@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 import scipy
 import itertools
-from .cuda import example
+from .cuda import example, tensor_core_had
 from fast_hadamard_transform import hadamard_transform
 from . import utils
 
@@ -171,9 +171,14 @@ def triton_fast_had_2d(a, had_size):
     # return a
 
 cached_pointers = {}
-def fast_had_2d_graph_wrapper(a, had_size=None, use_graph=False):
+def fast_had_2d_graph_wrapper(a: torch.Tensor, had_size=None, use_graph=False):
     if had_size is None:
         had_size = a.shape[0]
+    
+    # if had_size <= 256:
+    #     assert a.stride(0) == 1
+    #     tensor_core_had.fast_had_trans(a.data_ptr(), a.shape[0], a.shape[1], int(math.log2(had_size)))
+    #     return a
 
     if not use_graph or not utils.use_graph:
         return triton_fast_had_2d(a, had_size) # hadamard_transform(a.T.view(a.shape[1], -1, had_size)).view_as(a.T).T / math.sqrt(had_size)
@@ -205,6 +210,9 @@ def right_had(a, had_size=None, use_graph=False):
     return (res_flat.T.unflatten(0, flats))
 
 def left_had(a, had_size=None, use_graph=False):
+    if a.stride(-2) != 1:
+        a, old = torch.empty((*a.shape[:-2], a.shape[-1], a.shape[-2]), dtype=a.dtype, device=a.device).T, a
+        a.copy_(old)
     if len(a.shape) == 2:
         return fast_had_2d_graph_wrapper(a, had_size, use_graph)
     a = a.transpose(-2, -1)

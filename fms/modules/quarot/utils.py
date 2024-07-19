@@ -5,10 +5,11 @@ import random
 from .fast_had_trans import left_had, right_had
 from .special_had import get_had172
 
-dtype     = torch.float16
-qdtype    = torch.int8 # float16 # 8_e4m3fn # 16 # int8  #_e5m2
-accdtype  = torch.int32 # float16 # float16 # int32
-scaledtype= torch.float16
+dtype          = torch.float16
+qdtype         = torch.int8 # float16 # 8_e4m3fn # 16 # int8  #_e5m2
+accdtype       = torch.int32 # float16 # float16 # int32
+scaledtype     = torch.float16
+max_qint = torch.tensor(7) # 0 if qdtype not in [torch.int8, torch.int16, torch.int32] else torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min()
 
 use_quant_map = False
 skip_bad_layers = False
@@ -22,7 +23,7 @@ use_graph = False # TODO: this is broken
 
 temp_layer = 0
 
-def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None) -> tuple[torch.Tensor, torch.Tensor]:
+def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, use_mse=False) -> tuple[torch.Tensor, torch.Tensor]:
     if device is None:
         device = weight.device
     
@@ -37,7 +38,7 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None) -> tuple[torch.T
         # return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device)
         # scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.int8, torch.int16]:
-        scale_max = torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min().to(weight.device, dtype=scaledtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
+        scale_max = max_qint.to(weight.device, dtype=scaledtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
         return weight.type(qdtype).to(device), torch.tensor(1, dtype=scaledtype).to(device)
     else:
@@ -46,9 +47,35 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None) -> tuple[torch.T
     mag, _ = weight.abs().max(dim=dim, keepdim=True)
     mag = mag.to(scaledtype)
     scale = mag / scale_max
+
+    # Adapted to match QuaRot
+    if use_mse:
+        err_shape = list(weight.shape)
+        err_shape[dim] = 1 # weight shape except for dim, since only 1 scale along dim
+        best_err = torch.full(err_shape, torch.inf, device=device)
+        steps = 100
+        min_frac = 0.2
+        for i in range(int((1-min_frac) * steps)): # 0.2 * 100: min % to shrink to, how many steps to cut max into
+            mag1 = (1 - i / steps) * mag
+
+            scale1 = mag1 / scale_max # has right shape based on dim
+            weight1 = weight / scale
+            if qdtype in [torch.int8, torch.int16]:
+                weight1 = weight1.clamp(max=max_qint.to(weight1.device)).round()
+            weight1 = weight1.type(qdtype)
+            weight1_comp = weight1.type(dtype) * scale1
+
+            diff = weight - weight1_comp
+            err = diff.abs().pow(2.4).sum(dim)
+
+            # update best scale and err, per row
+            is_new_best = err < best_err
+            best_err = torch.where(is_new_best, err, best_err)
+            scale = torch.where(is_new_best, scale1, scale)
+
     weight = weight / scale
     if qdtype in [torch.int8, torch.int16]:
-        weight = weight.round()
+        weight = weight.clamp(max=max_qint.to(weight.device)).round()
     return weight.type(qdtype).to(device), scale.to(device)
 
 def diag_tile_block(block, reps):
@@ -174,7 +201,8 @@ def init(device):
     global had172
     had172 = get_had172(device) / torch.sqrt(torch.tensor(172, dtype=torch.float16, device=device))
     global rand_diag
-    rand_diag = torch.diag(torch.randint(0, 2, (4096,), device=device, dtype=torch.float16) * 2 - 1)
+    torch.manual_seed(0)
+    rand_diag = torch.diag(torch.randint(1, 2, (4096,), device=device, dtype=torch.float16) * 2 - 1)
 
 def weight_check(key_steps, targets):
     if isinstance(targets, str):

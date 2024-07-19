@@ -119,8 +119,14 @@ def _legacy_attn_unfused_to_fused_adapter(orig_sd):
                 name = name.split('.')
                 # if pre_rot is not None or post_rot is not None: # TODO: see if removing this makes it slow due to inefficient transposes
                 temp = qkv_unfused[i].T
-                temp = utils.apply_pre_rot(name, temp)
+
+                # prepare for post-rot by enforcing row major
+                if temp.stride(-1) != 1:
+                    temp, old = torch.empty(temp.shape, dtype=temp.dtype, device=temp.device), temp
+                    temp.copy_(old)
+                # apply post-rot first since pre-rot will make matrix column major
                 temp = utils.apply_post_rot(name, temp)
+                temp = utils.apply_pre_rot(name, temp)
                 qkv_unfused[i] = temp.T
             new_sd[new_name] = torch.cat(
                 qkv_unfused, dim=0

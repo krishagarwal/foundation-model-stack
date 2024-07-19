@@ -8,6 +8,10 @@ import math
 from . import utils
 from . import mmul_triton
 
+from tqdm import tqdm
+
+# iter_count = 0
+iterator = None
 
 class Linear(Module):
 
@@ -28,6 +32,10 @@ class Linear(Module):
         self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs))
         self.is_no_quant_layer = False
         self.reset_parameters()
+        
+        global iterator
+        if iterator is None:
+            iterator = tqdm(range(32 * 7))
 
     def reset_parameters(self) -> None:
         # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
@@ -136,10 +144,19 @@ class Linear(Module):
 
             self.is_no_quant_layer = (utils.skip_bad_layers and 'w2' in key_steps and utils.weight_check(key_steps, ['21'])) # 2, 4 9? 10? 12? 20? 21! 22nan
 
+            # prepare for post-rot by enforcing row major
+            if weight.stride(-1) != 1:
+                weight, old = torch.empty(weight.shape, dtype=weight.dtype, device=weight.device), weight
+                weight.copy_(old)
+            # apply post-rot first since pre-rot will make matrix column major
+            weight = apply_post_rot(key_steps, weight)
+
             # TODO: if other special no quantize cases, modify to work for those (NOTE: only works for down projection)
             if not self.is_no_quant_layer:
                 weight = apply_pre_rot(key_steps, weight)
-            weight = apply_post_rot(key_steps, weight)
+            else:
+                weight, old = torch.empty((*weight.shape[:-2], weight.shape[-1], weight.shape[-2]), dtype=weight.dtype, device=weight.device).T, weight
+                weight.copy_(old)
             
             if not self.is_no_quant_layer:
                 # using gpt8 weights
@@ -157,11 +174,14 @@ class Linear(Module):
                     weight = weight.type(self.qdtype)
                     self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device)
                 else:
-                    weight, self.weight_scale = utils.quantize(weight, self.qdtype, dim=-2)
+                    weight, self.weight_scale = utils.quantize(weight, self.qdtype, dim=-2, use_mse=True)
             
             temp = torch.zeros((weight.shape[1], weight.shape[0]), dtype=weight.dtype, device=weight.device) # TODO: check if weight always 2D
             temp = temp.T
             weight = temp.copy_(weight)
             self.weight = torch.nn.Parameter(weight, requires_grad=False)
+
+            global iterator
+            iterator.update(1)
         # except Exception as e:
         #     raise Exception(repr(e))
