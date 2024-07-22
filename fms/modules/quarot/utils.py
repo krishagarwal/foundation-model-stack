@@ -7,9 +7,11 @@ from .special_had import get_had172
 
 dtype          = torch.float16
 qdtype         = torch.int8 # float16 # 8_e4m3fn # 16 # int8  #_e5m2
+uqdtype        = torch.uint8
 accdtype       = torch.int32 # float16 # float16 # int32
 scaledtype     = torch.float16
-max_qint = torch.tensor(7) # 0 if qdtype not in [torch.int8, torch.int16, torch.int32] else torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min()
+bits = 8
+# max_qint = torch.tensor(127) # 0 if qdtype not in [torch.int8, torch.int16, torch.int32] else torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min()
 
 use_quant_map = False
 skip_bad_layers = False
@@ -23,12 +25,17 @@ use_graph = False # TODO: this is broken
 
 temp_layer = 0
 
-def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, use_mse=False) -> tuple[torch.Tensor, torch.Tensor]:
+weight_clip_ratio = 1
+activ_clip_ratio = 0.9
+kv_cache_clip_ratio = 0.95
+
+def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, sym=True, use_mse=False, clip_ratio=1) -> tuple[torch.Tensor, torch.Tensor]:
     if device is None:
         device = weight.device
     
     # TODO: make sure it works for all dtypes
     if qdtype in [torch.float8_e5m2, torch.float8_e4m3fn]:
+        raise Exception("this doesn't work anymore :(")
         # temp, _ = weight.abs().max(dim=dim, keepdim=True)
         # temp = 1#2.4
         # temp = current_float_val
@@ -38,15 +45,26 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, use_mse=False) -
         # return weight.type(qdtype), torch.tensor(1, dtype=dtype).to(device)
         # scale_max = torch.tensor([torch.finfo(qdtype).max, -torch.finfo(qdtype).min]).min().to(weight.device, dtype=dtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
     elif qdtype in [torch.int8, torch.int16]:
-        scale_max = max_qint.to(weight.device, dtype=scaledtype) # TODO: check if doing scale/offset calculations on gpu is optimal # TODO: find cleaner way to get min
+        max_qint = 2 ** (bits - 1) - 1 if sym else 2 ** bits - 1
+        min_qint = -(max_qint + 1) if sym else 0
     elif qdtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
-        return weight.type(qdtype).to(device), torch.tensor(1, dtype=scaledtype).to(device)
+        return weight.type(qdtype).to(device), torch.tensor(1, dtype=scaledtype).to(device), torch.tensor(0, dtype=scaledtype).to(device)
     else:
         raise ValueError("type not supported :(")
 
-    mag, _ = weight.abs().max(dim=dim, keepdim=True)
-    mag = mag.to(scaledtype)
-    scale = mag / scale_max
+    if sym:
+        offset = torch.tensor(0, dtype=qdtype, device=device)
+        mag, _ = weight.abs().max(dim=dim, keepdim=True)
+        mag *= clip_ratio
+    else:
+        weight_max = weight.max(dim=dim, keepdim=True)[0].maximum(torch.tensor(0, dtype=weight.dtype)) * clip_ratio
+        weight_min = weight.min(dim=dim, keepdim=True)[0].minimum(torch.tensor(0, dtype=weight.dtype)) * clip_ratio
+        is_zero = (weight_max == 0) & (weight_min == 0)
+        weight_max[is_zero] = 1
+        weight_min[is_zero] = -1
+        mag = weight_max - weight_min
+        offset = torch.round(-weight_min * max_qint / mag).to(scaledtype)
+    scale = (mag / max_qint).to(scaledtype)
 
     # Adapted to match QuaRot
     if use_mse:
@@ -58,12 +76,15 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, use_mse=False) -
         for i in range(int((1-min_frac) * steps)): # 0.2 * 100: min % to shrink to, how many steps to cut max into
             mag1 = (1 - i / steps) * mag
 
-            scale1 = mag1 / scale_max # has right shape based on dim
-            weight1 = weight / scale
+            scale1 = mag1 / max_qint # has right shape based on dim
+            weight1 = weight / scale + offset
             if qdtype in [torch.int8, torch.int16]:
-                weight1 = weight1.clamp(max=max_qint.to(weight1.device)).round()
-            weight1 = weight1.type(qdtype)
-            weight1_comp = weight1.type(dtype) * scale1
+                weight1 = weight1.clamp(min=min_qint, max=max_qint).round()
+            if sym:
+                weight1 = weight1.type(qdtype)
+            else:
+                weight1 = weight1.type(uqdtype)
+            weight1_comp = (scale1 * (weight1 - offset)).to(dtype)
 
             diff = weight - weight1_comp
             err = diff.abs().pow(2.4).sum(dim)
@@ -73,10 +94,14 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, use_mse=False) -
             best_err = torch.where(is_new_best, err, best_err)
             scale = torch.where(is_new_best, scale1, scale)
 
-    weight = weight / scale
+    weight = weight / scale + offset
     if qdtype in [torch.int8, torch.int16]:
-        weight = weight.clamp(max=max_qint.to(weight.device)).round()
-    return weight.type(qdtype).to(device), scale.to(device)
+        weight = weight.clamp(min=min_qint, max=max_qint).round()
+    if sym:
+        weight = weight.type(qdtype)
+    else:
+        weight = weight.type(uqdtype)
+    return weight.to(device), scale.to(device), offset.to(device)
 
 def diag_tile_block(block, reps):
     assert block.shape[-1] == block.shape[-2]
@@ -92,12 +117,13 @@ dot_threshold = 0.5
 fail_print_interval = 10
 
 cached_rotations = {}
-def random_rotation_almost_hadamard(size: int, use_hardcoded, run_full_orthogonality_tests, check_inv_max):
+def random_rotation_almost_hadamard(size: int, use_hardcoded, run_full_orthogonality_tests, check_inv_max, tile_size=None):
     if use_hardcoded:
-        tile_size = 1
-        while size % tile_size == 0:
-            tile_size *= 2
-        tile_size //= 2
+        if tile_size is None:
+            tile_size = 1
+            while size % tile_size == 0:
+                tile_size *= 2
+            tile_size //= 2
         tile_count = size // tile_size
 
         temp = torch.tensor(hadamard(tile_size), dtype=torch.float32) * torch.rsqrt(torch.tensor(tile_size))
@@ -180,11 +206,12 @@ dec_norm_weight = 'error'
 
 rots = []
 sizes = [4096, 128, 128, 11008]
-for size in sizes:
+tile_sizes = [None, None, None, 64]
+for size, tile_size in zip(sizes, tile_sizes):
     if not use_hadamard:
         rots.append((torch.eye(size, dtype=dtype), torch.eye(size, dtype=dtype)))
     else:
-        r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True)
+        r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True, tile_size=tile_size)
         rots.append((r, r_inv))
     # rots.append((r, r.T))
 

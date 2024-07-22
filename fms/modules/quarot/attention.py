@@ -107,7 +107,7 @@ class UnfusedQKV(QKV):
     def forward(
         self, q: torch.Tensor, k: Optional[torch.Tensor], v: Optional[torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q = utils.quantize(q, utils.qdtype)
+        q = utils.quantize(q, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
         if k is None and v is None:
             k = q
             v = q
@@ -116,8 +116,8 @@ class UnfusedQKV(QKV):
                 "both k and v must either be given as tensors or both None"
             )
         else:
-            k = utils.quantize(k, utils.qdtype)
-            v = utils.quantize(v, utils.qdtype)
+            k = utils.quantize(k, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
+            v = utils.quantize(v, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
 
         queries = self.query(q)
         keys = self.key(k)
@@ -175,7 +175,7 @@ class FusedQKV(QKV):
             qkv = q
         else:
             raise ValueError("q, k, and v must be the same or k and v must be None")
-        qkv = utils.quantize(qkv, utils.qdtype)
+        qkv = utils.quantize(qkv, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
         return self.qkv_fused(qkv).split(self.splits, dim=-1)
 
 class MultiHeadAttention(nn.Module):
@@ -288,10 +288,10 @@ class MultiHeadAttention(nn.Module):
         # TODO: bad way of mimicing kv-cache quantization
         # TODO: assymetric quantization for kv-cache as per quarot
         # k is already rotated above and v is already rotated by w_v, k's rotation gets cancelled out by q's rotation, v's gets cancelled out by w_o
-        keys, keys_scale = utils.quantize(keys, utils.qdtype)
-        values, values_scale = utils.quantize(values, utils.qdtype)
-        keys = (keys * keys_scale).to(utils.dtype)
-        values = (values * values_scale).to(utils.dtype)
+        keys, keys_scale, keys_offset = utils.quantize(keys, utils.qdtype, sym=False, clip_ratio=utils.kv_cache_clip_ratio)
+        values, values_scale, values_offset = utils.quantize(values, utils.qdtype, sym=False, clip_ratio=utils.kv_cache_clip_ratio)
+        keys = (keys_scale * (keys - keys_offset)).to(utils.dtype)
+        values = (values_scale * (values - values_offset)).to(utils.dtype)
 
         # if you want to use caching and past_key_value_state is not None meaning you have values in your cache
         if (
@@ -369,7 +369,7 @@ class MultiHeadAttention(nn.Module):
             .view(batch_size, q_len, self.nheads * self.emb_v_per_head)
         )
 
-        attn = utils.quantize(attn, utils.qdtype)
+        attn = utils.quantize(attn, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
 
         out = self.dense(attn)
 

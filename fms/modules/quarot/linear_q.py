@@ -118,20 +118,33 @@ class Linear(Module):
             return self.basic_mmul(input, self.weight)
         
         # input is tuple if quantized
-        input, input_scale = input
+        input, input_scale, _ = input # ignore offset since input should have been quantized symmetrically
         assert input.dtype == self.qdtype, f"input: {input.dtype}, self: {self.qdtype}"
         
-        a, a_s = input, input_scale
-        b, b_s = self.weight, self.weight_scale
+        # a, a_s, a_o = input, input_scale, input_offset
+        # b, b_s, b_o = self.weight, self.weight_scale, self.weight_offset
 
         #self.fp8_mmul
         mul_func = self.int_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.fp8_mmul_triton if self.qdtype in [torch.float8_e4m3fn] else self.basic_mmul
-
-        # a * b = c
-        # (a * as) * (b * bs) = (ab)(as*bs)
+        
         # TODO: check efficiency, had to change order so scale didn't reach inf
         # TODO: check if need cast to fp32 after matmul
+
+        a, a_s = input, input_scale
+        b, b_s = self.weight, self.weight_scale
         ab = ((mul_func(a, b).to(torch.float32) * a_s) * b_s).type(utils.dtype)
+
+        # assymetric stuff below
+        # (aq * as + ao) * (bq * bs + bo)
+        # (aq*bq)(as*bs) + aq*as*bo + ao*bq*bs + ao*bo
+
+        # a_as_b_bs = ((mul_func(a, b).to(torch.float32) * a_s) * b_s).type(utils.dtype)
+        # a_ds = a * a_s
+        # b_ds = b * b_s
+        # ads_bo = (a_ds.sum(-1, keepdim=True) * b_o).to(utils.dtype)
+        # bds_ao = (a_o * b_ds.sum(-2, keepdim=True)).to(utils.dtype)
+        # ao_bo = self.in_features * (a_o * b_o).to(utils.dtype)
+        # ab = a_as_b_bs + ads_bo + bds_ao + ao_bo
 
         return ab
 
@@ -174,7 +187,7 @@ class Linear(Module):
                     weight = weight.type(self.qdtype)
                     self.weight_scale = torch.tensor(1, dtype=self.dtype).to(weight.device)
                 else:
-                    weight, self.weight_scale = utils.quantize(weight, self.qdtype, dim=-2, use_mse=True)
+                    weight, self.weight_scale, _ = utils.quantize(weight, self.qdtype, dim=-2, sym=True, use_mse=True, clip_ratio=utils.weight_clip_ratio)
             
             temp = torch.zeros((weight.shape[1], weight.shape[0]), dtype=weight.dtype, device=weight.device) # TODO: check if weight always 2D
             temp = temp.T

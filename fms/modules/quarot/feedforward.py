@@ -42,7 +42,7 @@ class GatedLinearUnit(nn.Module):
                 getattr(self, layer).bias.data.zero_()
 
     def forward(self, x):
-        x = utils.quantize(x, utils.qdtype)
+        x = utils.quantize(x, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
         out = self.a(self.wg(x)) * self.w1(x)
         if self.p_dropout:
             out = self.d(out)
@@ -51,7 +51,7 @@ class GatedLinearUnit(nn.Module):
                 # out = out @ utils.rots[3][0]
                 out = (out.reshape(-1, 172, 64).transpose(-1, -2) @ utils.had172).transpose(-1, -2).reshape_as(out)
                 out = fast_had_trans.right_had(out, had_size=64, use_graph=(out.shape[-2] == 1)) # TODO: don't hardcode
-            out = utils.quantize(out, utils.qdtype)
+            out = utils.quantize(out, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
         result = self.w2(out)
         # # TODO: remove
         # if utils.temp_layer < 32:

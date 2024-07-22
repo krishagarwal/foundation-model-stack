@@ -6,7 +6,7 @@ import triton.language as tl
 import scipy
 import itertools
 from .cuda import example, tensor_core_had
-from fast_hadamard_transform import hadamard_transform
+# from fast_hadamard_transform import hadamard_transform
 from . import utils
 
 def is_cuda():
@@ -109,8 +109,8 @@ def triton_trans(a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, stride_n, h:
     my_col = n_range
     my_col_mask = my_col < N
 
-    idx1 = (my_id * stride_m).expand_dims(1) + (my_col * stride_n).expand_dims(0)
-    idx1_mask = tl.broadcast_to(my_col_mask.expand_dims(0), BLOCK_SIZE_M, BLOCK_SIZE_N)
+    idx1 = (my_id * stride_m)[:, None] + (my_col * stride_n)[None, :]
+    idx1_mask = tl.broadcast_to(my_col_mask[None, :], (BLOCK_SIZE_M, BLOCK_SIZE_N))
     x = tl.load(a_ptr + idx1, idx1_mask)
     y = tl.load((a_ptr + h * stride_m) + idx1, idx1_mask)
     tl.store(a_ptr + idx1, (x + y) * 0.7071067811865475, idx1_mask)
@@ -127,18 +127,18 @@ def triton_below_1k_trans(a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, str
 
     my_col = n_range
     my_col_mask = my_col < N
-    idx1_mask = tl.broadcast_to(my_col_mask.expand_dims(0), BLOCK_SIZE_M, BLOCK_SIZE_N)
+    idx1_mask = tl.broadcast_to(my_col_mask[None, :], (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
     # my_chunk = tl.load(a_ptr + (m_range * stride_m)[:, None] + (n_range * stride_n)[None, :])
 
     h = 1
     while h < had_size:
         my_id = (m_range % h) + (m_range // h) * h * 2
-        idx1 = (my_id * stride_m).expand_dims(1) + (my_col * stride_n).expand_dims(0)
+        idx1 = (my_id * stride_m)[:, None] + (my_col * stride_n)[None, :]
         x = tl.load(a_ptr + idx1, idx1_mask)
         y = tl.load((a_ptr + h * stride_m) + idx1, idx1_mask)
-        tl.store(a_ptr + idx1, (x + y) * tl.rsqrt(2.0), idx1_mask)
-        tl.store((a_ptr + h * stride_m) + idx1, (x - y) * tl.rsqrt(2.0), idx1_mask)
+        tl.store(a_ptr + idx1, (x + y) / tl.sqrt(2.0), idx1_mask)
+        tl.store((a_ptr + h * stride_m) + idx1, (x - y) / tl.sqrt(2.0), idx1_mask)
         # x = my_chunk[0]
         # x = tl.load(my_chunk + tl.arange(0, 1))
         # y = my_chunk[idx1 + h]
@@ -158,7 +158,7 @@ def triton_fast_had_2d(a, had_size):
     block_size_m = min(had_size // 2, ELEMENTS_PER_BLOCK)
     block_size_n = ELEMENTS_PER_BLOCK // block_size_m
     h = 2 * block_size_m
-    triton_below_1k_trans[grid](a, a.shape[0], a.shape[1], a.stride(0), a.stride(1), h, BLOCK_SIZE_M=block_size_m, BLOCK_SIZE_N=block_size_n, num_warps=ELEMENTS_PER_BLOCK // 32 // ELEMENTS_PER_THREAD)
+    triton_below_1k_trans[grid](a, a.shape[0], a.shape[1], a.stride(0), a.stride(1), h, BLOCK_SIZE_M=block_size_m, BLOCK_SIZE_N=block_size_n)#, num_warps=ELEMENTS_PER_BLOCK // 32 // ELEMENTS_PER_THREAD)
 
     # h = 1
 
@@ -175,10 +175,10 @@ def fast_had_2d_graph_wrapper(a: torch.Tensor, had_size=None, use_graph=False):
     if had_size is None:
         had_size = a.shape[0]
     
-    # if had_size <= 256:
-    #     assert a.stride(0) == 1
-    #     tensor_core_had.fast_had_trans(a.data_ptr(), a.shape[0], a.shape[1], int(math.log2(had_size)))
-    #     return a
+    if had_size <= 256:
+        assert a.stride(0) == 1
+        tensor_core_had.fast_had_trans(a.data_ptr(), a.shape[0], a.shape[1], int(math.log2(had_size)))
+        return a
 
     if not use_graph or not utils.use_graph:
         return triton_fast_had_2d(a, had_size) # hadamard_transform(a.T.view(a.shape[1], -1, had_size)).view_as(a.T).T / math.sqrt(had_size)
