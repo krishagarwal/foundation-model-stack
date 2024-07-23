@@ -369,6 +369,14 @@ class MultiHeadAttention(nn.Module):
             .view(batch_size, q_len, self.nheads * self.emb_v_per_head)
         )
 
+        attn = attn.view(-1, self.nheads, self.emb_v_per_head)
+        attn, old = torch.empty(attn.transpose(1, 2).shape, dtype=attn.dtype, device=attn.device).transpose(1, 2), attn
+        attn.copy_(old)
+        attn = utils.left_had(attn)
+        attn, old = torch.empty(attn.shape, dtype=attn.dtype, device=attn.device), attn
+        attn.copy_(old)
+        attn = attn.view(batch_size, q_len, self.nheads * self.emb_v_per_head)
+
         attn = utils.quantize(attn, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
 
         out = self.dense(attn)

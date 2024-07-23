@@ -282,7 +282,7 @@ def apply_pre_rot(key_steps, a):
     if weight_check(key_steps, ['query', 'key', 'value']):
         return left_had(rand_diag @ a) # rots[0][1] @ a
     if weight_check(key_steps, 'dense'):
-        return left_had(a, had_size=128) # rots[1][1] @ a # TODO: don't hardcode # TODO: bring back rand_diag here
+        return left_had(a) # rots[1][1] @ a # TODO: don't hardcode # TODO: bring back rand_diag here
     return a
 
 def apply_post_rot(key_steps, a):
