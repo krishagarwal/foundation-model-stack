@@ -1,7 +1,10 @@
+import torch
 import torch.nn as nn
 from . import linear_q
 from . import utils
 from . import fast_had_trans
+from fast_hadamard_transform import hadamard_transform
+from .special_had import get_had172
 
 class GatedLinearUnit(nn.Module):
 
@@ -48,9 +51,27 @@ class GatedLinearUnit(nn.Module):
             out = self.d(out)
         if not self.w2.is_no_quant_layer:
             if utils.use_hadamard: # TODO: this is fix to make sure no rotations happen when we skip quantizing a down proj layer
+                # out = out.T
+                # outv = out.reshape(-1, 64, 172)
+                # outv = outv @ get_had172('cuda', dtype=torch.float16)
+                # outv = hadamard_transform(outv.to(torch.float32).T, scale=1.0/torch.tensor(11008, dtype=torch.float32).sqrt()).T
+                # # fast_had_trans.left_had(out, had_size=64)
+                # out = outv.reshape(out.shape).T
+                # out, old = torch.empty(out.shape, dtype=out.dtype, device=out.device), out
+                # out.copy_(old)
+
+                # TODO: cleanup
+
+                a = out #a.T
+                av = a.view(-1, 172, 64)
+                av = hadamard_transform(av.to(torch.float32), scale=1.0/torch.tensor(11008, dtype=torch.float32).sqrt())#right_had(av, had_size=64)
+                av = get_had172('cuda', dtype=torch.float64) @ av.to(torch.float64)
+                out = av.view(a.shape)#.T
+                
+
                 # out = out @ utils.rots[3][0]
-                out = (out.reshape(-1, 172, 64).transpose(-1, -2) @ utils.had172).transpose(-1, -2).reshape_as(out)
-                out = fast_had_trans.right_had(out, had_size=64, use_graph=(out.shape[-2] == 1)) # TODO: don't hardcode
+                # out = (out.reshape(-1, 172, 64).transpose(-1, -2) @ utils.had172).transpose(-1, -2).reshape_as(out)
+                # out = fast_had_trans.right_had(out, had_size=64, use_graph=(out.shape[-2] == 1)) # TODO: don't hardcode
             out = utils.quantize(out, utils.qdtype, clip_ratio=utils.activ_clip_ratio)
         result = self.w2(out)
         # # TODO: remove

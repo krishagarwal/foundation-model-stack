@@ -163,7 +163,7 @@ class Linear(Module):
                 weight, old = torch.empty(weight.shape, dtype=weight.dtype, device=weight.device), weight
                 weight.copy_(old)
             # apply post-rot first since pre-rot will make matrix column major
-            weight = apply_post_rot(key_steps, weight) # TODO: don't hardcode, casts to match QuaRot
+            weight = apply_post_rot(key_steps, weight)
             # TODO: if other special no quantize cases, modify to work for those (NOTE: only works for down projection)
             if not self.is_no_quant_layer:
                 weight = apply_pre_rot(key_steps, weight)

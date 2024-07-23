@@ -146,15 +146,15 @@ def generate(
         else:
             next_input = result
 
-    chosen_probs = torch.tensor(chosen_probs)
-    logs = chosen_probs.log()
-    mean = logs.mean()
-    perp = (-mean).exp()
+    # chosen_probs = torch.tensor(chosen_probs)
+    # logs = chosen_probs.log()
+    # mean = logs.mean()
+    # perp = (-mean).exp()
     
-    softmax_metric = torch.tensor(softmax_dots).mean() if utils.test_against_truth else None
+    # softmax_metric = torch.tensor(softmax_dots).mean() if utils.test_against_truth else None
 
-    print(f"val: {utils.current_float_val}, perplexity: {perp}, softmax metric: {softmax_metric}")
-    utils.current_score = softmax_metric
+    # print(f"val: {utils.current_float_val}, perplexity: {perp}, softmax metric: {softmax_metric}")
+    # utils.current_score = softmax_metric
 
     if is_truth and utils.test_against_truth:
         with open('correct_token_ids.pickle', 'wb') as f:

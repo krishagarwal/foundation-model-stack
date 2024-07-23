@@ -6,7 +6,7 @@ import triton.language as tl
 import scipy
 import itertools
 from .cuda import example, tensor_core_had
-# from fast_hadamard_transform import hadamard_transform
+from fast_hadamard_transform import hadamard_transform
 from . import utils
 
 def is_cuda():
@@ -149,26 +149,26 @@ def triton_below_1k_trans(a_ptr, M: tl.constexpr, N: tl.constexpr, stride_m, str
 
 # requires matrix dim 0 is power of 2 and had_size is power of 2
 def triton_fast_had_2d(a, had_size):
-    grid = lambda META: (triton.cdiv(a.shape[1], META['BLOCK_SIZE_N']), triton.cdiv(a.shape[0], 2 * META['BLOCK_SIZE_M']), )
-    if had_size is None:
-        had_size = a.shape[0]
+    # grid = lambda META: (triton.cdiv(a.shape[1], META['BLOCK_SIZE_N']), triton.cdiv(a.shape[0], 2 * META['BLOCK_SIZE_M']), )
+    # if had_size is None:
+    #     had_size = a.shape[0]
 
-    ELEMENTS_PER_THREAD = 16
-    ELEMENTS_PER_BLOCK = 512
-    block_size_m = min(had_size // 2, ELEMENTS_PER_BLOCK)
-    block_size_n = ELEMENTS_PER_BLOCK // block_size_m
-    h = 2 * block_size_m
-    triton_below_1k_trans[grid](a, a.shape[0], a.shape[1], a.stride(0), a.stride(1), h, BLOCK_SIZE_M=block_size_m, BLOCK_SIZE_N=block_size_n)#, num_warps=ELEMENTS_PER_BLOCK // 32 // ELEMENTS_PER_THREAD)
+    # ELEMENTS_PER_THREAD = 16
+    # ELEMENTS_PER_BLOCK = 512
+    # block_size_m = min(had_size // 2, ELEMENTS_PER_BLOCK)
+    # block_size_n = ELEMENTS_PER_BLOCK // block_size_m
+    # h = 2 * block_size_m
+    # triton_below_1k_trans[grid](a, a.shape[0], a.shape[1], a.stride(0), a.stride(1), h, BLOCK_SIZE_M=block_size_m, BLOCK_SIZE_N=block_size_n)#, num_warps=ELEMENTS_PER_BLOCK // 32 // ELEMENTS_PER_THREAD)
 
-    # h = 1
+    # # h = 1
 
-    while h < had_size:
-        triton_trans[grid](a, a.shape[0], a.shape[1], a.stride(0), a.stride(1), h, BLOCK_SIZE_M=16, BLOCK_SIZE_N=32)
-        h *= 2
-    return a
-
-    # a = hadamard_transform(a.T.view(-1, had_size)).view(*a.shape[::-1]).T / math.sqrt(a.shape[0])
+    # while h < had_size:
+    #     triton_trans[grid](a, a.shape[0], a.shape[1], a.stride(0), a.stride(1), h, BLOCK_SIZE_M=16, BLOCK_SIZE_N=32)
+    #     h *= 2
     # return a
+
+    a = hadamard_transform(a.T.view(-1, had_size), torch.rsqrt(torch.tensor(a.shape[0], dtype=torch.float32)).item()).view(*a.shape[::-1]).T # / math.sqrt(a.shape[0])
+    return a
 
 cached_pointers = {}
 def fast_had_2d_graph_wrapper(a: torch.Tensor, had_size=None, use_graph=False):

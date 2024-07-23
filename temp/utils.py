@@ -3,7 +3,6 @@ from scipy.linalg import hadamard
 import random
 # from kmeans_gpu import KMeans
 from .fast_had_trans import left_had, right_had
-from fast_hadamard_transform import hadamard_transform
 from .special_had import get_had172
 
 dtype          = torch.float16
@@ -11,9 +10,9 @@ qdtype         = torch.int8 # float16 # 8_e4m3fn # 16 # int8  #_e5m2
 uqdtype        = torch.uint8
 accdtype       = torch.int32 # float16 # float16 # int32
 scaledtype     = torch.float16
-bits = 4
+bits = 8
 
-offline_dtype = torch.float64
+offline_dtype = torch.float16#64
 # max_qint = torch.tensor(127) # 0 if qdtype not in [torch.int8, torch.int16, torch.int32] else torch.tensor([torch.iinfo(qdtype).max, -torch.iinfo(qdtype).min]).min()
 
 use_quant_map = False
@@ -55,29 +54,22 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, sym=True, use_ms
     else:
         raise ValueError("type not supported :(")
 
-    if sym and not use_mse:
+    if sym:
         offset = torch.tensor(0, dtype=qdtype, device=device)
         mag, _ = weight.abs().max(dim=dim, keepdim=True)
         mag *= clip_ratio
-        is_zero = mag == 0
-        scale = torch.where(is_zero, 1, (mag / max_qint).to(scaledtype))
-    elif not sym:
+    else:
         weight_max = weight.max(dim=dim, keepdim=True)[0].maximum(torch.tensor(0, dtype=weight.dtype)) * clip_ratio
         weight_min = weight.min(dim=dim, keepdim=True)[0].minimum(torch.tensor(0, dtype=weight.dtype)) * clip_ratio
         is_zero = (weight_max == 0) & (weight_min == 0)
         weight_max[is_zero] = 1
         weight_min[is_zero] = -1
-        mag = weight_max - weight_min # xmax
-        scale = (mag / max_qint).to(scaledtype)
-        offset = torch.round(-weight_min / scale).to(scaledtype)
-    # Adapted to match QuaRot
-    elif use_mse:
-        assert sym, "asym mse not supported"
-        offset = torch.tensor(0, dtype=qdtype, device=device)
-        mag, _ = weight.abs().max(dim=dim, keepdim=True)
-        mag = mag.clamp(min=1e-5)
-        scale = (mag / max_qint).to(scaledtype)
+        mag = weight_max - weight_min
+        offset = torch.round(-weight_min * max_qint / mag).to(scaledtype)
+    scale = (mag / max_qint).to(scaledtype)
 
+    # Adapted to match QuaRot
+    if use_mse:
         err_shape = list(weight.shape)
         err_shape[dim] = 1 # weight shape except for dim, since only 1 scale along dim
         best_err = torch.full(err_shape, torch.inf, device=device)
@@ -87,14 +79,14 @@ def quantize(weight: torch.Tensor, qdtype, dim=-1, device=None, sym=True, use_ms
             mag1 = (1 - i / steps) * mag
 
             scale1 = mag1 / max_qint # has right shape based on dim
-            weight1 = weight / scale1
+            weight1 = weight / scale + offset
             if qdtype in [torch.int8, torch.int16]:
                 weight1 = weight1.clamp(min=min_qint, max=max_qint).round()
-            # if sym:
-            weight1 = weight1.type(qdtype)
-            # else:
-            #     weight1 = weight1.type(uqdtype)
-            weight1_comp = (scale1 * (weight1)).to(dtype)
+            if sym:
+                weight1 = weight1.type(qdtype)
+            else:
+                weight1 = weight1.type(uqdtype)
+            weight1_comp = (scale1 * (weight1 - offset)).to(dtype)
 
             diff = weight - weight1_comp
             err = diff.abs().pow(2.4).sum(dim)
@@ -221,17 +213,16 @@ for size, tile_size in zip(sizes, tile_sizes):
     else:
         r, r_inv = random_rotation_almost_hadamard(size, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=True, tile_size=tile_size)
         rots.append((r, r_inv))
-
+# TODO: bad hardcoded fix to make sure attn down proj pre-rot is still full size
+if use_hadamard:
+    rots[1] = (rots[1][0], random_rotation_almost_hadamard(4096, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=False)[1])
+    # rots.append((r, r.T))
 
 # idx = 1
 # swap = torch.tensor([[0, 1], [1, 0]], dtype=dtype)
 # tiled = diag_tile_block(swap, sizes[idx] // 2)
 # rots[idx] = (tiled, tiled)
-# rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
-# TODO: bad hardcoded fix to make sure attn down proj pre-rot is still full size
-if use_hadamard:
-    rots[1] = (diag_tile_block(rots[1][0], 32), random_rotation_almost_hadamard(4096, use_hardcoded=True, run_full_orthogonality_tests=False, check_inv_max=False)[1])
-    # rots.append((r, r.T))
+rots[1] = (diag_tile_block(rots[1][0], 32), diag_tile_block(rots[1][1], 32))
 
 def init(device):
     global rots
@@ -284,21 +275,12 @@ def apply_pre_rot(key_steps, a):
     if weight_check(key_steps, ['wg', 'w1', 'head']):
         return rots[0][1] @ rand_diag @ a # left_had(rand_diag @ a) # rots[0][1] @ a
     if weight_check(key_steps, 'w2'):
-        a = a.T
-        av = a.view(-1, 172, 64)
-        av = hadamard_transform(av.to(torch.float32), scale=1.0/torch.tensor(11008, dtype=torch.float32).sqrt())#right_had(av, had_size=64)
-        av = get_had172('cuda', dtype=torch.float64) @ av.to(torch.float64)
-        av = av.view(a.shape).T
-        return av
-
-        # rot64 = rots[3][1] @ a # left_had(a, had_size=64)
-        # out = torch.zeros(rot64.shape[::-1], dtype=rot64.dtype, device=rot64.device)
-        # out.copy_(rot64.T)
-        # out = (out.reshape(-1, 172, 64).transpose(-1, -2) @ had172_offline).transpose(-1, -2).reshape_as(out)
-        # rot64.copy_(out.T)
-        # return rot64
-    
-
+        rot64 = rots[3][1] @ a # left_had(a, had_size=64)
+        out = torch.zeros(rot64.shape[::-1], dtype=rot64.dtype, device=rot64.device)
+        out.copy_(rot64.T)
+        out = (out.reshape(-1, 172, 64).transpose(-1, -2) @ had172_offline).transpose(-1, -2).reshape_as(out)
+        rot64.copy_(out.T)
+        return rot64
         # return (had172 @ rot64.view(64, 172, -1).transpose(0, 1).reshape(172, -1)).view(172, 64, -1).transpose(0, 1).reshape(11008, -1)
         # return triton_fast_had(a, had_size=256) # rots[3][1] @ a # TODO: don't hardcode
     if weight_check(key_steps, ['query', 'key', 'value']):
@@ -307,11 +289,11 @@ def apply_pre_rot(key_steps, a):
         return rots[1][1] @ a # left_had(a) # rots[1][1] @ a # TODO: don't hardcode # TODO: bring back rand_diag here
     return a
 
-def apply_post_rot(key_steps, a: torch.Tensor):
+def apply_post_rot(key_steps, a : torch.Tensor):
     if not use_hadamard:
         return a
     if weight_check(key_steps, ['emb']):
-        a = a - a.mean(dim=-1, keepdim=True) # TODO: not sure why, but QuaRot does this
+        a = a - a.mean(dim=-1, keepdim=True)
     if weight_check(key_steps, ['dense', 'emb']):
         return a @ rand_diag @ rots[0][0] # right_had(a @ rand_diag) # a @ rots[0][0]
     if weight_check(key_steps, 'value'):
