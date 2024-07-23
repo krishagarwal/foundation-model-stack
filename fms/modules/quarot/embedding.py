@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 import torch
 import torch.distributed
 import torch.nn as nn
-from . import linear_q
 from . import utils
 from numpy import sign
 from torch.distributed.distributed_c10d import ProcessGroup
@@ -19,17 +18,18 @@ from fms.modules.tp import TPModule
 
 class Embedding(nn.Embedding):
     def custom_load(self, weight, key_steps: list[str], apply_pre_rot, apply_post_rot, scale=None):
-        weight = weight.to(utils.dtype)
+        weight = weight.to(utils.offline_dtype)
         weight = apply_pre_rot(key_steps, weight)
         weight = apply_post_rot(key_steps, weight)
+        weight = weight.to(utils.dtype)
         self.weight = torch.nn.Parameter(weight, requires_grad=False)
 
 class Linear(nn.Linear):
     def custom_load(self, weight, key_steps: list[str], apply_pre_rot, apply_post_rot, scale=None):
-        weight = weight.T.to(utils.dtype)
+        weight = weight.T.to(utils.offline_dtype)
         weight = apply_pre_rot(key_steps, weight)
         weight = apply_post_rot(key_steps, weight)
-        weight = weight.T
+        weight = weight.T.to(utils.dtype)
         self.weight = torch.nn.Parameter(weight, requires_grad=False)
 
 class WordEmbedding(nn.Module):

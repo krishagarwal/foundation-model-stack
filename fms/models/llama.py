@@ -132,7 +132,10 @@ class LLaMABlock(nn.Module):
 
         # first we do MHA and Add&Norm
         residual = x
+
+        x = x.to(torch.float32)
         x = self.ln(x)
+        x = x.to(torch.float16)
         x = self.attn(
             q=x,
             mask=mask,
@@ -153,7 +156,9 @@ class LLaMABlock(nn.Module):
 
         # then we do FF and Add&Norm
         residual = x
+        x = x.to(torch.float32)
         x = self.ff_ln(x)
+        x = x.to(torch.float16)
         x = self.ff_sub_layer(x)
         if self.config.p_dropout != 0:
             x = self.dropout(x)
@@ -344,7 +349,10 @@ class LLaMA(nn.Module):
                 x_in = output
 
         dec_out = x_in
+
+        dec_out = dec_out.to(torch.float32)
         dec_out = self.dec_norm(dec_out)
+        dec_out = dec_out.to(torch.float16)
         if self.config.p_dropout:
             dec_out = self.dropout(dec_out)
 

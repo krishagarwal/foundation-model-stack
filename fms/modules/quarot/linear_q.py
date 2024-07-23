@@ -157,19 +157,20 @@ class Linear(Module):
 
             self.is_no_quant_layer = (utils.skip_bad_layers and 'w2' in key_steps and utils.weight_check(key_steps, ['21'])) # 2, 4 9? 10? 12? 20? 21! 22nan
 
+            weight = weight.to(utils.offline_dtype)
             # prepare for post-rot by enforcing row major
             if weight.stride(-1) != 1:
                 weight, old = torch.empty(weight.shape, dtype=weight.dtype, device=weight.device), weight
                 weight.copy_(old)
             # apply post-rot first since pre-rot will make matrix column major
             weight = apply_post_rot(key_steps, weight)
-
             # TODO: if other special no quantize cases, modify to work for those (NOTE: only works for down projection)
             if not self.is_no_quant_layer:
                 weight = apply_pre_rot(key_steps, weight)
             else:
                 weight, old = torch.empty((*weight.shape[:-2], weight.shape[-1], weight.shape[-2]), dtype=weight.dtype, device=weight.device).T, weight
                 weight.copy_(old)
+            weight = weight.to(utils.dtype)
             
             if not self.is_no_quant_layer:
                 # using gpt8 weights
