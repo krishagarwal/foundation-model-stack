@@ -1,10 +1,11 @@
+from typing import Tuple
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.nn import Parameter
 
 # get dtype for storage and number of bits (can be different for fake quant)
-def quant_dtype_to_torch_dtype(quant_dtype) -> tuple[torch.dtype, int]:
+def quant_dtype_to_torch_dtype(quant_dtype) -> Tuple[torch.dtype, int]:
     if quant_dtype == "int8":
         return torch.int8, 8
     elif quant_dtype == "int4-fake":
@@ -13,7 +14,7 @@ def quant_dtype_to_torch_dtype(quant_dtype) -> tuple[torch.dtype, int]:
         raise ValueError("Unsupported quant_dtype for quantization of weights")
 
 
-def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1) -> tuple[torch.Tensor, torch.Tensor]:
+def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1) -> Tuple[torch.Tensor, torch.Tensor]:
     assert qdtype in [torch.int8, torch.uint8], "Quantize only supports int8 or uint8"
     assert sym ^ (qdtype in [torch.uint8]), "Symmetric must use signed, assymetric must use unsigned dtype"
 
@@ -115,6 +116,7 @@ def int_mmul(self, a: torch.Tensor, b: torch.Tensor):
 
 class Linear(nn.Module):
     def __init__(self, in_features: int, out_features: int, quant_dtype: torch.dtype, bits: int, clip_ratio: float, bias: bool = True, device=None) -> None:
+        super().__init__()
         self.quant_dtype = quant_dtype
         self.bits = bits
         factory_kwargs = {'device': device, 'dtype': self.quant_dtype}

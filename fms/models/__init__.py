@@ -260,6 +260,7 @@ def get_model(
     group: Optional[ProcessGroup] = None,
     quant_dtype: Optional[str] = None,
     activ_clip_ratio: Optional[float] = None,
+    rotate: bool = False,
     **kwargs,
 ):
     """
@@ -349,7 +350,7 @@ def get_model(
         fms_model = model_wrap(fms_model)
 
     if quant_dtype:
-        _quantize_inplace(fms_model, quant_dtype, False, activ_clip_ratio)
+        _quantize_inplace(fms_model, quant_dtype, rotate, activ_clip_ratio)
 
     if len(lazy_sd):
         serialization.load_state_dict_into_model(

@@ -108,6 +108,11 @@ parser.add_argument(
     help="ratio for scale of activations when quantized (typically <= 1)",
     default=0.9, # TODO: check if setting a good but not None-like default is proper fms style
 )
+parser.add_argument(
+    "--rotate",
+    action="store_true",
+)
+
 parser.add_argument("--context_file", type=str, default=None, help="File to summarize")
 
 args = parser.parse_args()
@@ -154,6 +159,7 @@ model = get_model(
     group=dist.group.WORLD,
     quant_dtype=args.quant_dtype,
     activ_clip_ratio=args.activ_clip_ratio,
+    rotate=args.rotate
 )
 
 if args.unfuse_weights:

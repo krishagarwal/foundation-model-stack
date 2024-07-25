@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 from fms.models import llama # registers adapters
 from fms.utils.serialization import _get_adapter
@@ -9,6 +10,8 @@ from fms.utils import serialization #load_state_dict
 from safetensors.torch import save_file
 
 from fms.modules.quantized import quant_dtype_to_torch_dtype
+from fms.modules.rotated import full_normed_right_hadamard
+from fms.utils.special_had import get_hadK
 
 def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16, dim=-1, device=None) -> tuple[torch.Tensor, torch.Tensor]:
     if device is None:
@@ -53,7 +56,7 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
     weight = weight.type(qdtype)
     return weight.to(device), scale.to(device)
 
-def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype_str: str):
+def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype_str: str, rotate: bool):
     save_end = "weights.safetensors"
     if not save_path.endswith("/" + save_end): # TODO: clean up
         if save_path.endswith("/"):
@@ -80,7 +83,7 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
         """Check if any of `match_list` is in `target`"""
         for m in match_list:
             if m in target:
-                return True
+                return m # TODO: ugly, but string should evaluate to True
         return False
 
     # norms = {
@@ -100,8 +103,41 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
         "w2",
     ]
 
+    # values are things that are absorbed into keys
+    absorptions = {
+        "attn.in_proj.qkv_fused": "ln",
+        "ff_sub_layer.wg1_fused": "ff_ln",
+        "shared.head": "dec_norm"
+    }
+    absorb_keys = absorptions.keys()
+    # dependency_vals = dependencies.values()
+    # dependency_sd = {}
+
     print("Quantizing state dict...")
     for item, val in tqdm(lazy_sd.items()):
+        # # if something will absorb this, set it aside for now
+        # if item in dependency_vals and val is not None:
+        #     dependency_sd[item] = val
+        #     continue
+
+        if rotate:
+            # absorb if needed
+            if match(absorb_keys, item):
+                # dependency_num = re.findall(r'\.\d+\.', item)
+                # if len(dependency_num) == 0:
+                dependence = match(absorb_keys, item)
+                dependency_name = item.replace(dependence, absorptions[dependence])
+                # val2 = dependency_sd.pop(dependency_name, None)
+                # if val2 is None:
+                val2 = lazy_sd.get(dependency_name)
+                # else:
+                #     lazy_sd[dependency_name] = None # mark as done
+
+                
+                # absorb, works in all 3
+                val = (val2.view(1, -1).to(torch.float64) * val.to(torch.float64)).to(val.dtype)
+
+
         # item = name_map[item_old]
         if match(quantize_match, item):
             assert item.endswith('.weight')
@@ -147,7 +183,11 @@ if __name__ == "__main__":
         default="",
         choices=["", "int8", "int4-fake"],
     )
+    parser.add_argument(
+        "--rotate",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
-    load_quantize_store(args.load_path, args.save_path, args.model_source, args.quant_dtype)
+    load_quantize_store(args.load_path, args.save_path, args.model_source, args.quant_dtype, args.rotate)
