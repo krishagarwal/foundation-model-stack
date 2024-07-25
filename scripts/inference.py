@@ -95,6 +95,12 @@ parser.add_argument(
     help="Pad inputs to a minimum specified length. If any prompt is larger than the specified length, padding will be determined by the largest prompt",
     default=0,
 )
+parser.add_argument(
+    "--quant_dtype",
+    type=str,
+    help="enables quantization to the specified dtype",
+    default="",
+)
 parser.add_argument("--context_file", type=str, default=None, help="File to summarize")
 
 args = parser.parse_args()
@@ -139,6 +145,7 @@ model = get_model(
     source=args.model_source,
     distributed_strategy=distr_param,
     group=dist.group.WORLD,
+    quant_dtype=args.quant_dtype,
 )
 
 if args.unfuse_weights:

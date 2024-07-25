@@ -202,6 +202,37 @@ def _fsdp_wrap(
 
     return model
 
+def _quantize_inplace(model: nn.Module, qdtype, rotate: bool) -> None:
+    from fms.models.llama import LLaMA, LLaMABlock
+    from fms.modules import quantized
+    assert isinstance(model, LLaMA), "quantized model only supported for LLaMa"
+    assert qdtype == "int8", "only int8 quantization supported for now"
+    qdtype = torch.int8
+
+    def swap_linear(old: nn.Linear):
+        return quantized.Linear(old.in_features, old.out_features, qdtype, old.bias, old.weight.device)
+
+    if rotate:
+        model.dec_norm.elementwise_scale = False
+
+    for layer in model.layers:
+        layer: LLaMABlock
+        if rotate:
+            layer.ln.elementwise_scale = False
+            layer.ff_ln.elementwise_scale = False
+        
+        attn = layer.attn
+        attn.dense = swap_linear(attn.dense)
+        if attn.fused:
+            attn.in_proj.qkv_fused = swap_linear(attn.in_proj.qkv_fused)
+        else:
+            attn.in_proj.query = swap_linear(attn.in_proj.query)
+            attn.in_proj.key = swap_linear(attn.in_proj.key)
+            attn.in_proj.value = swap_linear(attn.in_proj.value)
+        
+        ff = layer.ff_sub_layer
+        ff.wg1_fused = swap_linear(ff.wg1_fused)
+        ff.w2 = swap_linear(ff.w2)
 
 def _is_dp(distributed_strategy):
     return distributed_strategy in {"fsdp", "hsdp", "ddp"}
@@ -216,6 +247,7 @@ def get_model(
     distributed_strategy: Optional[str] = None,
     checkpoint_sharding: Optional[str] = None,
     group: Optional[ProcessGroup] = None,
+    quant_dtype: str = None,
     **kwargs,
 ):
     """
@@ -303,6 +335,9 @@ def get_model(
 
     if not pre_load:
         fms_model = model_wrap(fms_model)
+
+    if quant_dtype:
+        _quantize_inplace(fms_model, quant_dtype, False)
 
     if len(lazy_sd):
         serialization.load_state_dict_into_model(
