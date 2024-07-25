@@ -13,10 +13,7 @@ def quant_dtype_to_torch_dtype(quant_dtype) -> tuple[torch.dtype, int]:
         raise ValueError("Unsupported quant_dtype for quantization of weights")
 
 
-def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, device=None, sym=True, clip_ratio=1) -> tuple[torch.Tensor, torch.Tensor]:
-    if device is None:
-        device = weight.device
-    
+def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1) -> tuple[torch.Tensor, torch.Tensor]:
     assert qdtype in [torch.int8, torch.uint8], "Quantize only supports int8 or uint8"
     assert sym ^ (qdtype in [torch.uint8]), "Symmetric must use signed, assymetric must use unsigned dtype"
 
@@ -116,41 +113,32 @@ def int_mmul(self, a: torch.Tensor, b: torch.Tensor):
         res[idx] = temp
     return res
 
-class Linear(nn.Linear):
-    def __init__(self, in_features: int, out_features: int, quant_dtype: torch.dtype, bits: int, bias: bool = True, device=None) -> None:
+class Linear(nn.Module):
+    def __init__(self, in_features: int, out_features: int, quant_dtype: torch.dtype, bits: int, clip_ratio: float, bias: bool = True, device=None) -> None:
         self.quant_dtype = quant_dtype
         self.bits = bits
-        
-        # with torch.no_grad():
-        #     super().__init__(in_features, out_features, bias, device, dtype)
-
-        # can't call super() because it has required_grad
         factory_kwargs = {'device': device, 'dtype': self.quant_dtype}
-        super(nn.Linear, self).__init__() # have to call grandparent now
         self.in_features = in_features
         self.out_features = out_features
-        # TODO: revert to empty, this is just for debugging
         self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs), requires_grad=False)
         # if bias:
         #     self.bias = Parameter(torch.empty(out_features, **factory_kwargs), requires_grad=False)
         # else:
         #     self.register_parameter('bias', None)
         # self.reset_parameters()
-
         if bias:
             raise ValueError("Bias is not yet supported with quantization")
-        # TODO: revert to empty, this is just for debugging
-        # TODO: choose the scale dtype
+        # TODO: consider choosing the scale dtype
         self.weight_scale = torch.nn.Parameter(torch.empty((out_features, 1), device=device, dtype=torch.float16), requires_grad=False)
-
         # TODO: support more dtypes and assign correct function (based on self.quant_dtype)
         self.mmul_func = int_mmul
         # self.int_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.fp8_mmul_triton if self.qdtype in [torch.float8_e4m3fn] else self.basic_mmul
+        self.clip_ratio = clip_ratio
 
     def forward(self, input) -> torch.Tensor:
         # TODO: check efficiency, had to change order so scale didn't reach inf
         # TODO: check if need cast to fp32 after matmul
-        a, a_s = quantize(input, self.quant_dtype, self.bits) # TODO: maybe read from weight?
+        a, a_s = quantize(input, self.quant_dtype, self.bits, dim=-1, sym=True, clip_ratio=self.clip_ratio) # TODO: maybe read from weight?
         return (self.mmul_func(self, a, self.weight.T).to(torch.float32) * a_s * self.weight_scale.T).to(input.dtype)
     
     def reset_parameters(self) -> None:

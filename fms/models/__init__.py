@@ -203,15 +203,17 @@ def _fsdp_wrap(
 
     return model
 
-def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool) -> None:
+def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_clip_ratio: Optional[float]) -> None:
     from fms.models.llama import LLaMA, LLaMABlock
     from fms.modules import quantized
     assert isinstance(model, LLaMA), "quantized model only supported for LLaMa"
 
     quant_dtype, bits = quant_dtype_to_torch_dtype(qdtype_str)
+    if activ_clip_ratio is None: # TODO: this is a fix so that benchmark_inference.py works without the arg
+        activ_clip_ratio = 1
 
     def swap_linear(old: nn.Linear):
-        return quantized.Linear(old.in_features, old.out_features, quant_dtype, bits, old.bias, old.weight.device)
+        return quantized.Linear(old.in_features, old.out_features, quant_dtype, bits, activ_clip_ratio, old.bias, old.weight.device)
 
     def quant_reset_parameters(module):
         for m in module.modules():
@@ -256,7 +258,8 @@ def get_model(
     distributed_strategy: Optional[str] = None,
     checkpoint_sharding: Optional[str] = None,
     group: Optional[ProcessGroup] = None,
-    quant_dtype: str = None,
+    quant_dtype: Optional[str] = None,
+    activ_clip_ratio: Optional[float] = None,
     **kwargs,
 ):
     """
@@ -346,7 +349,7 @@ def get_model(
         fms_model = model_wrap(fms_model)
 
     if quant_dtype:
-        _quantize_inplace(fms_model, quant_dtype, False)
+        _quantize_inplace(fms_model, quant_dtype, False, activ_clip_ratio)
 
     if len(lazy_sd):
         serialization.load_state_dict_into_model(

@@ -25,8 +25,8 @@ def partial_normed_right_hadamard(a: torch.Tensor, completed_size, remaining_siz
     return a
 
 class Linear(quantized.Linear):
-    def __init__(self, in_features: int, out_features: int, quant_dtype: torch.dtype, bits: int, full_had: bool, had_size, completed_size: int = 0, bias: bool = True, device=None) -> None:
-        super().__init__(in_features, out_features, quant_dtype, bits, bias, device)
+    def __init__(self, in_features: int, out_features: int, quant_dtype: torch.dtype, bits: int, clip_ratio: float, full_had: bool, had_size, completed_size: int = 0, bias: bool = True, device=None) -> None:
+        super().__init__(in_features, out_features, quant_dtype, bits, clip_ratio, bias, device)
         if full_had:
             pow2size, hadK = get_hadK(had_size)
             self.rotate = functools.partial(full_normed_right_hadamard, power_of_two_size=pow2size, hadK=hadK)
