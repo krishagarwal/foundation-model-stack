@@ -8,6 +8,7 @@ from tqdm import tqdm
 from fms.utils import serialization #load_state_dict
 from safetensors.torch import save_file
 
+from fms.modules.quantized import quant_dtype_to_torch_dtype
 
 def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16, dim=-1, device=None) -> tuple[torch.Tensor, torch.Tensor]:
     if device is None:
@@ -52,13 +53,15 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
     weight = weight.type(qdtype)
     return weight.to(device), scale.to(device)
 
-def load_quantize_store(load_path: str, save_path: str, source: str):
+def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype_str: str):
     save_end = "weights.safetensors"
     if not save_path.endswith("/" + save_end): # TODO: clean up
         if save_path.endswith("/"):
             save_path = save_path + save_end
         else:
             save_path = save_path + "/" + save_end
+
+    quant_dtype, bits = quant_dtype_to_torch_dtype(quant_dtype_str)
 
     # TODO: support distributed, etc.? function accepts those args
     print(f"Loading [lazy] state dict from: {load_path}")
@@ -103,7 +106,7 @@ def load_quantize_store(load_path: str, save_path: str, source: str):
         if match(quantize_match, item):
             assert item.endswith('.weight')
             item_s = item.replace('.weight', '.weight_scale')
-            valq, val_s = quantize(val.to('cuda'), torch.int8, 8, torch.float16, dim=-1)
+            valq, val_s = quantize(val.to('cuda'), quant_dtype, bits, torch.float16, dim=-1)
             valq, val_s = valq.to('cpu'), val_s.to('cpu')
             save_sd[item] = valq
             save_sd[item_s] = val_s
@@ -137,7 +140,14 @@ if __name__ == "__main__":
         required=True,
         help="Source of the checkpoint. E.g. 'meta', 'hf', None",
     )
+    parser.add_argument(
+        "--quant_dtype",
+        type=str,
+        help="enables quantization to the specified dtype",
+        default="",
+        choices=["", "int8", "int4-fake"],
+    )
 
     args = parser.parse_args()
 
-    load_quantize_store(args.load_path, args.save_path, args.model_source)
+    load_quantize_store(args.load_path, args.save_path, args.model_source, args.quant_dtype)

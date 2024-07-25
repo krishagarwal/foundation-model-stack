@@ -100,6 +100,7 @@ parser.add_argument(
     type=str,
     help="enables quantization to the specified dtype",
     default="",
+    choices=["", "int8", "int4-fake"],
 )
 parser.add_argument("--context_file", type=str, default=None, help="File to summarize")
 

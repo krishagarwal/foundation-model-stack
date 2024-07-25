@@ -137,6 +137,13 @@ parser.add_argument(
     action="store_true",
     help="If set to True, this will unfuse any fused weight modules that support the unfuse_weights method",
 )
+parser.add_argument(
+    "--quant_dtype",
+    type=str,
+    help="enables quantization to the specified dtype",
+    default="",
+    choices=["", "int8", "int4-fake"],
+)
 
 args = parser.parse_args()
 
@@ -164,7 +171,7 @@ if world_size > 1:
     torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
 
 print("loading model")
-model = models.get_model(args.architecture, args.variant, device_type=args.device_type)
+model = models.get_model(args.architecture, args.variant, device_type=args.device_type, quant_dtype=args.quant_dtype)
 
 if args.unfuse_weights:
     print("unfusing weights")

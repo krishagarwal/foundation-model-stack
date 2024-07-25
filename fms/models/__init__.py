@@ -20,6 +20,7 @@ from fms.distributed.strategy import (
 )
 from fms.utils import serialization
 
+from fms.modules.quantized import quant_dtype_to_torch_dtype
 
 __models: MutableMapping[str, MutableMapping[str, Callable[[], nn.Module]]] = {}
 
@@ -202,15 +203,20 @@ def _fsdp_wrap(
 
     return model
 
-def _quantize_inplace(model: nn.Module, qdtype, rotate: bool) -> None:
+def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool) -> None:
     from fms.models.llama import LLaMA, LLaMABlock
     from fms.modules import quantized
     assert isinstance(model, LLaMA), "quantized model only supported for LLaMa"
-    assert qdtype == "int8", "only int8 quantization supported for now"
-    qdtype = torch.int8
+
+    quant_dtype, bits = quant_dtype_to_torch_dtype(qdtype_str)
 
     def swap_linear(old: nn.Linear):
-        return quantized.Linear(old.in_features, old.out_features, qdtype, old.bias, old.weight.device)
+        return quantized.Linear(old.in_features, old.out_features, quant_dtype, bits, old.bias, old.weight.device)
+
+    def quant_reset_parameters(module):
+        for m in module.modules():
+            if isinstance(m, nn.Linear):
+                m.weight.zero_()
 
     if rotate:
         model.dec_norm.elementwise_scale = False
@@ -229,8 +235,11 @@ def _quantize_inplace(model: nn.Module, qdtype, rotate: bool) -> None:
             attn.in_proj.query = swap_linear(attn.in_proj.query)
             attn.in_proj.key = swap_linear(attn.in_proj.key)
             attn.in_proj.value = swap_linear(attn.in_proj.value)
+        # TODO: check if there's a way to do this without hardcoding
+        attn.reset_parameters = partial(quant_reset_parameters, module=attn)
         
         ff = layer.ff_sub_layer
+        ff.reset_parameters = partial(quant_reset_parameters, module=ff)
         ff.wg1_fused = swap_linear(ff.wg1_fused)
         ff.w2 = swap_linear(ff.w2)
 
