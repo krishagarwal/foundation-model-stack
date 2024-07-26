@@ -144,6 +144,10 @@ parser.add_argument(
     default="",
     choices=["", "int8", "int4-fake"],
 )
+parser.add_argument(
+    "--rotate",
+    action="store_true",
+)
 
 args = parser.parse_args()
 
@@ -171,7 +175,7 @@ if world_size > 1:
     torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
 
 print("loading model")
-model = models.get_model(args.architecture, args.variant, device_type=args.device_type, quant_dtype=args.quant_dtype)
+model = models.get_model(args.architecture, args.variant, device_type=args.device_type, quant_dtype=args.quant_dtype, rotate=args.rotate)
 
 if args.unfuse_weights:
     print("unfusing weights")

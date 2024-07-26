@@ -5,15 +5,19 @@ from . import quantized, positions
 import functools
 from fms.utils.special_had import get_hadK
 
+torch.ops.import_module("fms.modules.hadamard")
+
 def full_normed_right_hadamard(a: torch.Tensor, power_of_two_size, hadK):
     orig_shape = a.shape
     if hadK is None:
         a = a.view(-1, power_of_two_size)
-        a = hadamard_transform(a, scale=torch.tensor(power_of_two_size, dtype=a.dtype, device=a.device).rsqrt())
+        a = torch.ops.hadamard.transform(a, scale=torch.tensor(power_of_two_size, dtype=a.dtype, device=a.device).rsqrt())
+        # a = hadamard_transform(a, scale=torch.tensor(power_of_two_size, dtype=a.dtype, device=a.device).rsqrt())
     else:
         a = a.view(-1, hadK.shape[0], power_of_two_size)
-        a = hadamard_transform(a, scale=torch.tensor(power_of_two_size, dtype=a.dtype, device=a.device).rsqrt())
-        a = torch.matmul(hadK.T, a)
+        a = torch.ops.hadamard.transform(a, scale=torch.tensor(power_of_two_size, dtype=a.dtype, device=a.device).rsqrt())
+        # a = hadamard_transform(a, scale=torch.tensor(power_of_two_size, dtype=a.dtype, device=a.device).rsqrt())
+        a = torch.matmul(hadK, a)
     a = a.view(orig_shape)
     return a
 
@@ -21,7 +25,8 @@ def partial_normed_right_hadamard(a: torch.Tensor, completed_size, remaining_siz
     # TODO: handle remaining size not being power of 2
     orig_shape = a.shape
     a = a.view(-1, remaining_size, completed_size).transpose(-1, -2)
-    a = hadamard_transform(a, scale=torch.tensor(remaining_size, dtype=a.dtype, device=a.device).rsqrt())
+    a = torch.ops.hadamard.transform(a, scale=torch.tensor(remaining_size, dtype=a.dtype, device=a.device).rsqrt())
+    # a = hadamard_transform(a, scale=torch.tensor(remaining_size, dtype=a.dtype, device=a.device).rsqrt())
     a = a.transpose(-1, -2).reshape(orig_shape) # TODO: can we do a view?
     return a
 
