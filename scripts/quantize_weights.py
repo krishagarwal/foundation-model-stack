@@ -1,8 +1,7 @@
 import argparse
 import os
-import re
-import sys
 from fms.models import llama # registers adapters
+import fms.models
 from fms.utils.serialization import _get_adapter
 import torch
 from tqdm import tqdm
@@ -17,7 +16,6 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
     if device is None:
         device = weight.device
     
-    
     max_qint = 2 ** (bits - 1) - 1
     min_qint = -(max_qint + 1)
     
@@ -30,17 +28,14 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
     best_err = torch.full(err_shape, torch.inf, device=device)
     steps = 100
     min_frac = 0.2
-    for i in range(int((1-min_frac) * steps)): # 0.2 * 100: min % to shrink to, how many steps to cut max into
+    for i in range(int((1-min_frac) * steps)): # min_frac, 100: min % to shrink to, how many steps to cut max into
         mag1 = (1 - i / steps) * mag
 
         scale1 = mag1 / max_qint # has right shape based on dim
         weight1 = weight / scale1
         if qdtype in [torch.int8, torch.int16]:
             weight1 = weight1.clamp(min=min_qint, max=max_qint).round()
-        # if sym:
         weight1 = weight1.type(qdtype)
-        # else:
-        #     weight1 = weight1.type(uqdtype)
         weight1_comp = (scale1 * (weight1)).to(dtype) # TODO: consider fp64 to compare
 
         diff = weight - weight1_comp
@@ -56,7 +51,7 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
     weight = weight.type(qdtype)
     return weight.to(device), scale.to(device)
 
-def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype_str: str, rotate: bool):
+def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype_str: str, rotate: bool, config: llama.LLaMAConfig):
     save_end = "weights.safetensors"
     if not save_path.endswith("/" + save_end): # TODO: clean up
         if save_path.endswith("/"):
@@ -86,11 +81,6 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
                 return m # TODO: ugly, but string should evaluate to True
         return False
 
-    # norms = {
-    #     "dec_norm": {},
-    #     "ln": {},
-    #     "ff_ln": {},
-    # }
     quantize_match = [
         # "query"
         "qkv_fused",
@@ -103,6 +93,24 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
         "w2",
     ]
 
+    pre_rot_match = [
+        "qkv_fused",
+        "wg1_fused",
+        "shared.head",
+        "shared.emb", # this weight isn't transposed, unlike all others, so have to do pre_rot to achieve post rot
+        "dense",
+        "w2",
+    ]
+
+    post_rot_match = [
+        "dense",
+        "w2",
+    ]
+
+    special_rot_match = [
+        "qkv_fused",
+    ]
+
     # values are things that are absorbed into keys
     absorptions = {
         "attn.in_proj.qkv_fused": "ln",
@@ -110,32 +118,47 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
         "shared.head": "dec_norm"
     }
     absorb_keys = absorptions.keys()
-    # dependency_vals = dependencies.values()
-    # dependency_sd = {}
 
     print("Quantizing state dict...")
     for item, val in tqdm(lazy_sd.items()):
-        # # if something will absorb this, set it aside for now
-        # if item in dependency_vals and val is not None:
-        #     dependency_sd[item] = val
-        #     continue
-
         if rotate:
+            dtype = val.dtype
             # absorb if needed
             if match(absorb_keys, item):
-                # dependency_num = re.findall(r'\.\d+\.', item)
-                # if len(dependency_num) == 0:
                 dependence = match(absorb_keys, item)
                 dependency_name = item.replace(dependence, absorptions[dependence])
-                # val2 = dependency_sd.pop(dependency_name, None)
-                # if val2 is None:
                 val2 = lazy_sd.get(dependency_name)
-                # else:
-                #     lazy_sd[dependency_name] = None # mark as done
-
-                
                 # absorb, works in all 3
-                val = (val2.view(1, -1).to(torch.float64) * val.to(torch.float64)).to(val.dtype)
+                val = (val2.view(1, -1).to(torch.float64) * val.to(torch.float64))
+
+            pre_rot = match(pre_rot_match, item)
+            post_rot = match(post_rot_match, item)
+            special_rot = match(special_rot_match, item)
+
+            if pre_rot or post_rot or special_rot_match:
+                val = val.to(torch.float32).cuda() # TODO: consider not hardcoding
+                if pre_rot:
+                    had2, hadk = get_hadK(val.shape[-1])
+                    if hadk is not None:
+                        hadk = hadk.cuda()
+                        hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt() # TODO: consider fp64 norm
+                    val = full_normed_right_hadamard(val, had2, hadk)
+                if post_rot:
+                    had2, hadk = get_hadK(val.shape[0])
+                    if hadk is not None:
+                        hadk = hadk.cuda()
+                        hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt() # TODO: consider fp64 norm
+                    val = full_normed_right_hadamard(val.T, had2, hadk).T
+                if special_rot:
+                    # qkv needs v to have a post rot by head dim
+                    if "qkv_fused" in item:
+                        head_dim = config.emb_dim // config.nheads
+                        # extract v
+                        v = val[config.emb_dim * 2:]
+                        v = full_normed_right_hadamard(v.T.contiguous(), head_dim, None).T
+                        val[config.emb_dim * 2:] = v
+
+            val = val.to(dtype).contiguous().cpu()
 
 
         # item = name_map[item_old]
@@ -177,6 +200,20 @@ if __name__ == "__main__":
         help="Source of the checkpoint. E.g. 'meta', 'hf', None",
     )
     parser.add_argument(
+        "--architecture",
+        type=str,
+        default="llama",
+        help="The model architecture to benchmark",
+        choices=["llama"],
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="7b",
+        help="The model variant (configuration) to benchmark. E.g. 7b, 13b, 70b.",
+        choices=["7b"], # TODO: not tested on any but 7b
+    )
+    parser.add_argument(
         "--quant_dtype",
         type=str,
         help="enables quantization to the specified dtype",
@@ -190,4 +227,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    load_quantize_store(args.load_path, args.save_path, args.model_source, args.quant_dtype, args.rotate)
+    # sus thing to grab model config from factory
+    config = fms.models.__models[args.architecture][args.variant].config
+
+    load_quantize_store(args.load_path, args.save_path, args.model_source, args.quant_dtype, args.rotate, config)

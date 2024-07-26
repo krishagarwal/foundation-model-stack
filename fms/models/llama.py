@@ -440,11 +440,11 @@ _granite_8b_code_config = LLaMAConfig(
 _architecture_name = "llama"
 
 
-def _llama_factory_factory(config):
-    def factory(**kwargs):
-        return LLaMA(config, **kwargs)
-
-    return factory
+class _llama_factory_factory:
+    def __init__(self, config):
+        self.config = config
+    def __call__(self, **kwargs):
+        return LLaMA(self.config, **kwargs)
 
 
 models.register_model(
