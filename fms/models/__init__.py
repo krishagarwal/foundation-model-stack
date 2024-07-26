@@ -206,13 +206,17 @@ def _fsdp_wrap(
 def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_clip_ratio: Optional[float]) -> None:
     from fms.models.llama import LLaMA, LLaMABlock
     from fms.modules import quantized
+    from fms.modules import rotated
     assert isinstance(model, LLaMA), "quantized model only supported for LLaMa"
 
     quant_dtype, bits = quant_dtype_to_torch_dtype(qdtype_str)
     if activ_clip_ratio is None: # TODO: this is a fix so that benchmark_inference.py works without the arg
         activ_clip_ratio = 1
 
-    def swap_linear(old: nn.Linear):
+    def swap_linear(old: nn.Linear, had_size: Optional[int] = None, completed_size: Optional[int] = None):
+        if had_size:
+            is_full_had = not completed_size
+            return rotated.Linear(old.in_features, old.out_features, quant_dtype, bits, activ_clip_ratio, is_full_had, had_size, completed_size, old.bias, old.weight.device)
         return quantized.Linear(old.in_features, old.out_features, quant_dtype, bits, activ_clip_ratio, old.bias, old.weight.device)
 
     def quant_reset_parameters(module):
@@ -230,7 +234,10 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
             layer.ff_ln.elementwise_scale = False
         
         attn = layer.attn
-        attn.dense = swap_linear(attn.dense)
+        attn.dense = swap_linear(attn.dense, *((attn.nheads, attn.emb_v_per_head) if rotate else (None, None))) # online partial rotation before dense (per head rotation is already done by weight)
+        if rotate:
+            old_pos_enc = attn.position_encoder
+            attn.position_encoder = rotated.RotaryEmbedding(attn.emb_kq_per_head, old_pos_enc.dim, old_pos_enc.ratio, old_pos_enc.max_seq_len, old_pos_enc.ntk_scaling) # online post-RoPE QK rotation per head
         if attn.fused:
             attn.in_proj.qkv_fused = swap_linear(attn.in_proj.qkv_fused)
         else:
@@ -243,7 +250,7 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
         ff = layer.ff_sub_layer
         ff.reset_parameters = partial(quant_reset_parameters, module=ff)
         ff.wg1_fused = swap_linear(ff.wg1_fused)
-        ff.w2 = swap_linear(ff.w2)
+        ff.w2 = swap_linear(ff.w2, ff.w2.in_features if rotate else None) # online full rotation before down proj
 
 def _is_dp(distributed_strategy):
     return distributed_strategy in {"fsdp", "hsdp", "ddp"}

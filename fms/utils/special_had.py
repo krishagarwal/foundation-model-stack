@@ -23,7 +23,7 @@ def get_hadK(n):
 
     for size, get_had in supported_sizes:
         if n % size == 0 and is_pow2(n // size):
-            return n // size, get_had(size)
+            return n // size, get_had()
     
     raise ValueError(f"Size {n} not supported")
 
