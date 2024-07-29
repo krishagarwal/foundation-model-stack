@@ -203,15 +203,19 @@ def _fsdp_wrap(
 
     return model
 
-def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_clip_ratio: Optional[float]) -> None:
+def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_clip_ratio: Optional[float], kv_clip_ratio: Optional[float]) -> None:
     from fms.models.llama import LLaMA, LLaMABlock
     from fms.modules import quantized
     from fms.modules import rotated
     assert isinstance(model, LLaMA), "quantized model only supported for LLaMa"
 
     quant_dtype, bits = quant_dtype_to_torch_dtype(qdtype_str)
-    if activ_clip_ratio is None: # TODO: this is a fix so that benchmark_inference.py works without the arg
+
+    # TODO: this is a fix so that benchmark_inference.py works without either arg
+    if activ_clip_ratio is None:
         activ_clip_ratio = 1
+    if kv_clip_ratio is None:
+        kv_clip_ratio = 1
 
     def swap_linear(old: nn.Linear, had_size: Optional[int] = None, completed_size: Optional[int] = None):
         if had_size:
@@ -227,6 +231,8 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
     if rotate:
         model.dec_norm.elementwise_scale = False
 
+    kv_quantizer = quantized.KVCacheQuantizer(quantized.signed_to_unsigned_dtype(quant_dtype), bits, False, kv_clip_ratio) # TODO: consider allowing option for symmetric kv-cache quantization
+
     for layer in model.layers:
         layer: LLaMABlock
         if rotate:
@@ -234,6 +240,7 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
             layer.ff_ln.elementwise_scale = False
         
         attn = layer.attn
+        attn.kv_quantizer = kv_quantizer
         attn.dense = swap_linear(attn.dense, *((attn.nheads, attn.emb_v_per_head) if rotate else (None, None))) # online partial rotation before dense (per head rotation is already done by weight)
         if rotate:
             old_pos_enc = attn.position_encoder
@@ -267,6 +274,7 @@ def get_model(
     group: Optional[ProcessGroup] = None,
     quant_dtype: Optional[str] = None,
     activ_clip_ratio: Optional[float] = None,
+    kv_clip_ratio: Optional[float] = None,
     rotate: bool = False,
     **kwargs,
 ):
@@ -357,7 +365,7 @@ def get_model(
         fms_model = model_wrap(fms_model)
 
     if quant_dtype:
-        _quantize_inplace(fms_model, quant_dtype, rotate, activ_clip_ratio)
+        _quantize_inplace(fms_model, quant_dtype, rotate, activ_clip_ratio, kv_clip_ratio)
 
     if len(lazy_sd):
         serialization.load_state_dict_into_model(

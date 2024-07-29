@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Optional, Sequence, Tuple
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -12,6 +12,18 @@ def quant_dtype_to_torch_dtype(quant_dtype) -> Tuple[torch.dtype, int]:
         return torch.int8, 4 # fake quant since int8 not supported at the moment TODO: we'll add packing later
     else:
         raise ValueError("Unsupported quant_dtype for quantization of weights")
+
+def signed_to_unsigned_dtype(dtype: torch.dtype) -> torch.dtype:
+    if dtype == torch.int8:
+        return torch.uint8
+    elif dtype == torch.int16:
+        return torch.uint16
+    elif dtype == torch.int32:
+        return torch.uint32
+    elif dtype == torch.int64:
+        return torch.uint64
+    else:
+        raise ValueError("Provided dtype does not have an associated unsigned dtype")
 
 
 def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -48,6 +60,7 @@ def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1)
         mag = weight_max - weight_min
         scale = mag / max_qint
         offset = torch.round(-weight_min / scale)
+        weight = weight / scale + offset
         weight = weight.clamp(min=min_qint, max=max_qint).round()
 
         return weight.to(qdtype), scale, offset
@@ -145,3 +158,57 @@ class Linear(nn.Module):
     
     def reset_parameters(self) -> None:
         self.weight.zero_()
+
+class QuantizedTensor:
+    def __init__(self, value: torch.Tensor, scale: torch.Tensor, offset: Optional[torch.Tensor] = None):
+        self.value = value
+        self.scale = scale
+        self.offset = offset
+    
+    @property
+    def shape(self) -> torch.Size:
+        return self.value.shape
+    
+    def size(self, dim: None = None) -> torch.Size:
+        return self.value.size(dim)
+    
+    def dequantize(self) -> torch.Tensor:
+        if self.offset is None:
+            return self.scale * self.value
+        return self.scale * (self.value - self.offset)
+    
+    def cat(self, other: "QuantizedTensor", dim: int = 0) -> "QuantizedTensor":
+        value = torch.cat((self.value, other.value), dim)
+        scale = torch.cat((self.scale, other.scale), dim)
+        if self.offset is not None:
+            offset = torch.cat((self.offset, other.offset), dim) # TODO: maybe assert that both have/don't have offset
+        else:
+            offset = None
+        return QuantizedTensor(value, scale, offset)
+    
+    def numel(self) -> int:
+        return self.value.numel()
+    
+    def unsqueeze(self, dim: int) -> "QuantizedTensor":
+        return QuantizedTensor(self.value.unsqueeze(dim), self.scale.unsqueeze(dim), self.offset.unsqueeze(dim) if self.offset is not None else None)
+    
+    def flatten(self, start_dim: int = 0, end_dim: int = -1) -> "QuantizedTensor":
+        return QuantizedTensor(self.value.flatten(start_dim, end_dim), self.scale.flatten(start_dim, end_dim), self.offset.flatten(start_dim, end_dim) if self.offset is not None else None)
+    
+    def expand(self, size: Sequence[int], *, implicit: bool = False) -> "QuantizedTensor":
+        return QuantizedTensor(self.value.expand(size, implicit=implicit), self.scale.expand(size, implicit=implicit), self.offset.expand(size, implicit=implicit) if self.offset is not None else None)
+
+class KVCacheQuantizer:
+    def __init__(self, quant_dtype: torch.dtype, bits: int, sym: bool, clip_ratio: float) -> None:
+        self.quant_dtype = quant_dtype
+        self.bits = bits
+        self.sym = sym # TODO: consider not allowing symmetric
+        self.clip_ratio = clip_ratio
+    
+    def quantize(self, keys: torch.Tensor, values: torch.Tensor) -> Tuple[QuantizedTensor, QuantizedTensor]:
+        keys = quantize(keys, self.quant_dtype, self.bits, sym=self.sym, dim=-1, clip_ratio=self.clip_ratio)
+        values = quantize(values, self.quant_dtype, self.bits, sym=self.sym, dim=-1, clip_ratio=self.clip_ratio)
+        return QuantizedTensor(*keys), QuantizedTensor(*values)
+    
+    def dequantize(self, keys: QuantizedTensor, values: QuantizedTensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return keys.dequantize(), values.dequantize()

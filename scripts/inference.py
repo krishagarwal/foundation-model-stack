@@ -109,6 +109,12 @@ parser.add_argument(
     default=0.9, # TODO: check if setting a good but not None-like default is proper fms style
 )
 parser.add_argument(
+    "--kv_clip_ratio",
+    type=float,
+    help="ratio for scale of keys and values when quantized for caching (typically <= 1)",
+    default=0.95, # TODO: check if setting a good but not None-like default is proper fms style
+)
+parser.add_argument(
     "--rotate",
     action="store_true",
 )
@@ -159,6 +165,7 @@ model = get_model(
     group=dist.group.WORLD,
     quant_dtype=args.quant_dtype,
     activ_clip_ratio=args.activ_clip_ratio,
+    kv_clip_ratio=args.kv_clip_ratio,
     rotate=args.rotate
 )
 

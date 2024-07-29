@@ -14,7 +14,7 @@ from fms.distributed.tensorparallel import (
 )
 from fms.modules.positions import PositionEncoder
 from fms.modules.tp import TPModule
-
+from fms.modules.quantized import KVCacheQuantizer
 
 class QKV(nn.Module, metaclass=abc.ABCMeta):
     """Simple module for applying qkv in attention"""
@@ -238,6 +238,7 @@ class MultiHeadAttention(nn.Module):
         use_bias=False,
         position_encoder: Optional[PositionEncoder] = None,
         fused: bool = True,
+        kv_quantizer: Optional[KVCacheQuantizer] = None,
     ):
         super(MultiHeadAttention, self).__init__()
         self.nheads = nheads
@@ -270,6 +271,7 @@ class MultiHeadAttention(nn.Module):
             torch.backends.cuda.mem_efficient_sdp_enabled()
         )
         self.previous_math: bool = torch.backends.cuda.math_sdp_enabled()
+        self.kv_quantizer = kv_quantizer
 
     def reset_parameters(self):
         for m in self.modules():
@@ -344,6 +346,9 @@ class MultiHeadAttention(nn.Module):
         keys = keys.transpose(2, 1)  # / (self.emb_kq_per_head**(1/4))
         values = values.transpose(2, 1)  # compatible with QK.T
 
+        if self.kv_quantizer is not None:
+            keys, values = self.kv_quantizer.quantize(keys, values)
+
         # if you want to use caching and past_key_value_state is not None meaning you have values in your cache
         if (
             use_cache
@@ -351,8 +356,12 @@ class MultiHeadAttention(nn.Module):
             and past_key_value_state[0].numel() > 0
         ):
             if is_self:
-                keys = torch.cat((past_key_value_state[0], keys), dim=2)
-                values = torch.cat((past_key_value_state[1], values), dim=2)
+                if self.kv_quantizer is not None:
+                    keys = past_key_value_state[0].cat(keys, dim=2)
+                    values = past_key_value_state[1].cat(values, dim=2)
+                else:
+                    keys = torch.cat((past_key_value_state[0], keys), dim=2)
+                    values = torch.cat((past_key_value_state[1], values), dim=2)
             else:
                 keys = past_key_value_state[0]
                 values = past_key_value_state[1]
@@ -392,6 +401,9 @@ class MultiHeadAttention(nn.Module):
             torch.backends.cuda.enable_flash_sdp(use_flash)
             torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
             torch.backends.cuda.enable_math_sdp(use_math)
+        
+        if self.kv_quantizer is not None:
+            keys_e, values_e = self.kv_quantizer.dequantize(keys_e, values_e)
 
         attn = F.scaled_dot_product_attention(
             queries,
