@@ -25,6 +25,13 @@ def signed_to_unsigned_dtype(dtype: torch.dtype) -> torch.dtype:
     else:
         raise ValueError("Provided dtype does not have an associated unsigned dtype")
 
+def pack_int4(a: torch.Tensor) -> torch.Tensor:
+    a1, a2 = torch.chunk(a, 2, -1) # TODO: consider not hardcoding -1 dim
+    return (a1 << 4) | (a2 & 0b1111)
+
+def unpack_int4(a: torch.Tensor) -> torch.Tensor:
+    a1, a2 = a >> 4, (a << 4) >> 4 # need left + right shift here for sign extension to work
+    return torch.cat((a1, a2), -1) # TODO: consider not hardcoding -1 dim
 
 def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1) -> Tuple[torch.Tensor, torch.Tensor]:
     assert qdtype in [torch.int8, torch.uint8], "Quantize only supports int8 or uint8"
@@ -135,7 +142,12 @@ class Linear(nn.Module):
         factory_kwargs = {'device': device, 'dtype': self.quant_dtype}
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs), requires_grad=False)
+
+        # TODO: this case is kind of hard-coded, check if there's a cleaner way
+        if bits == 4:
+            self.weight = Parameter(torch.empty((out_features, in_features // 2), **factory_kwargs), requires_grad=False)
+        else:
+            self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs), requires_grad=False)
         # if bias:
         #     self.bias = Parameter(torch.empty(out_features, **factory_kwargs), requires_grad=False)
         # else:
@@ -149,12 +161,13 @@ class Linear(nn.Module):
         self.mmul_func = int_mmul
         # self.int_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.fp8_mmul_triton if self.qdtype in [torch.float8_e4m3fn] else self.basic_mmul
         self.clip_ratio = clip_ratio
+        self.unpack = unpack_int4 if bits == 4 else lambda x: x # TODO: assumes that weights are 4 bit when only activations could be 4-bit (actually why do activations 4-bit at all?)
 
     def forward(self, input) -> torch.Tensor:
         # TODO: check efficiency, had to change order so scale didn't reach inf
         # TODO: check if need cast to fp32 after matmul
         a, a_s = quantize(input, self.quant_dtype, self.bits, dim=-1, sym=True, clip_ratio=self.clip_ratio) # TODO: maybe read from weight?
-        return (self.mmul_func(self, a, self.weight.T).to(torch.float32) * a_s * self.weight_scale.T).to(input.dtype)
+        return (self.mmul_func(self, a, self.unpack(self.weight).T).to(torch.float32) * a_s * self.weight_scale.T).to(input.dtype)
     
     def reset_parameters(self) -> None:
         self.weight.zero_()

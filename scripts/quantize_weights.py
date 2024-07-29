@@ -8,7 +8,7 @@ from tqdm import tqdm
 from fms.utils import serialization #load_state_dict
 from safetensors.torch import save_file
 
-from fms.modules.quantized import quant_dtype_to_torch_dtype
+from fms.modules.quantized import quant_dtype_to_torch_dtype, pack_int4
 from fms.modules.rotated import full_normed_right_hadamard
 from fms.utils.special_had import get_hadK
 
@@ -166,6 +166,8 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
             assert item.endswith('.weight')
             item_s = item.replace('.weight', '.weight_scale')
             valq, val_s = quantize(val.to('cuda'), quant_dtype, bits, torch.float16, dim=-1)
+            if bits == 4: # TODO: this case is kind of hard-coded, look into better way
+                valq = pack_int4(valq)
             valq, val_s = valq.to('cpu'), val_s.to('cpu')
             save_sd[item] = valq
             save_sd[item_s] = val_s
