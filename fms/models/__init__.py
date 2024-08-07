@@ -230,6 +230,11 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
 
     if rotate:
         model.dec_norm.elementwise_scale = False
+        old_pos_enc = model.rot_emb
+        emb_kq_per_head = model.config.emb_dim // model.config.nheads
+        model.rot_emb = rotated.RotaryEmbedding(emb_kq_per_head, old_pos_enc.dim, old_pos_enc.ratio, old_pos_enc.max_seq_len, old_pos_enc.ntk_scaling)
+        model.rot_emb.cached_freqs = old_pos_enc.cached_freqs
+        model.rot_emb.max_seq_len_cached = old_pos_enc.max_seq_len_cached
 
     kv_quantizer = quantized.KVCacheQuantizer(quantized.signed_to_unsigned_dtype(quant_dtype), bits, False, kv_clip_ratio) # TODO: consider allowing option for symmetric kv-cache quantization
 
@@ -244,7 +249,7 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
         attn.dense = swap_linear(attn.dense, *((attn.nheads, attn.emb_v_per_head) if rotate else (None, None))) # online partial rotation before dense (per head rotation is already done by weight)
         if rotate:
             old_pos_enc = attn.position_encoder
-            attn.position_encoder = rotated.RotaryEmbedding(attn.emb_kq_per_head, old_pos_enc.dim, old_pos_enc.ratio, old_pos_enc.max_seq_len, old_pos_enc.ntk_scaling) # online post-RoPE QK rotation per head
+            attn.position_encoder = model.rot_emb
         if attn.fused:
             attn.in_proj.qkv_fused = swap_linear(attn.in_proj.qkv_fused)
         else:
