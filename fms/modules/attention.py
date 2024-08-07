@@ -16,6 +16,8 @@ from fms.modules.positions import PositionEncoder
 from fms.modules.tp import TPModule
 from fms.modules.quantized import KVCacheQuantizer
 
+torch.ops.import_module("fms.utils.dequant_attn")
+
 class QKV(nn.Module, metaclass=abc.ABCMeta):
     """Simple module for applying qkv in attention"""
 
@@ -357,8 +359,7 @@ class MultiHeadAttention(nn.Module):
         ):
             if is_self:
                 if self.kv_quantizer is not None:
-                    keys = past_key_value_state[0].cat(keys, dim=2)
-                    values = past_key_value_state[1].cat(values, dim=2)
+                    keys, values = self.kv_quantizer.cat(keys, values, *past_key_value_state)
                 else:
                     keys = torch.cat((past_key_value_state[0], keys), dim=2)
                     values = torch.cat((past_key_value_state[1], values), dim=2)
@@ -402,17 +403,28 @@ class MultiHeadAttention(nn.Module):
             torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
             torch.backends.cuda.enable_math_sdp(use_math)
         
-        if self.kv_quantizer is not None:
-            keys_e, values_e = self.kv_quantizer.dequantize(keys_e, values_e)
+        if self.kv_quantizer is None:
+            attn = F.scaled_dot_product_attention(
+                queries,
+                keys_e,
+                values_e,
+                attn_mask=attn_mask,
+                dropout_p=self.p_dropout if self.training else 0.0,
+                is_causal=is_causal_mask,
+            )
+        else:
+            # TODO: does not support explicit mask and dropout
+            attn = torch.ops.dequant.attn(
+                queries,
+                keys_e.value,
+                values_e.value,
+                keys_e.scale,
+                keys_e.offset,
+                values_e.scale,
+                values_e.offset,
+                is_causal_mask=is_causal_mask
+            )
 
-        attn = F.scaled_dot_product_attention(
-            queries,
-            keys_e,
-            values_e,
-            attn_mask=attn_mask,
-            dropout_p=self.p_dropout if self.training else 0.0,
-            is_causal=is_causal_mask,
-        )
 
         if attn_algorithm:
             torch.backends.cuda.enable_flash_sdp(self.previous_flash)

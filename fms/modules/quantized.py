@@ -4,6 +4,8 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn import Parameter
 
+torch.ops.import_module("fms.utils.int8_mmul")
+
 # get dtype for storage and number of bits (can be different for fake quant)
 def quant_dtype_to_torch_dtype(quant_dtype) -> Tuple[torch.dtype, int]:
     if quant_dtype == "int8":
@@ -36,9 +38,6 @@ def unpack_int4(a: torch.Tensor) -> torch.Tensor:
 def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1) -> Tuple[torch.Tensor, torch.Tensor]:
     assert qdtype in [torch.int8, torch.uint8], "Quantize only supports int8 or uint8"
     assert sym ^ (qdtype in [torch.uint8]), "Symmetric must use signed, assymetric must use unsigned dtype"
-
-    max_qint = 2 ** (bits - 1) - 1 if sym else 2 ** bits - 1
-    min_qint = -(max_qint + 1) if sym else 0
     
     if sym:
         max_qint = 2 ** (bits - 1) - 1
@@ -72,68 +71,6 @@ def quantize(weight: torch.Tensor, qdtype, bits, dim=-1, sym=True, clip_ratio=1)
 
         return weight.to(qdtype), scale, offset
 
-def int8_mmul(self, a: torch.Tensor, b: torch.Tensor):
-        res = torch.zeros((*a.shape[:-1], b.shape[-1]), dtype=torch.int32, device=a.device)
-        idxs = list((x,) for x in range(input.shape[-3]))
-
-        # TODO: bad fix, try batching multiple things into one mmul
-        for i in range(-4, -len(input.shape) - 1, -1):
-            idxs = [(curr, *idx) for idx in idxs for curr in range(input.shape[i])]
-            
-        # assert (len(a.shape) == 3)
-        # res = torch.zeros((a.shape[0], a.shape[1], b.shape[-1]), dtype=self.accdtype, device=a.device)
-        # TODO: check if more efficient way. int8 mmul seems to require 16 min dimension, maybe cause 16x16x16 tensor core
-        for idx in range(idxs):
-            temp = res[idx]
-            a_part = a[idx]
-            if a.shape[1] < 17:
-                pad_val = (0, 0, 0, 17 - a_part.shape[0])
-                a_part = F.pad(a_part, pad_val)
-                temp = F.pad(temp, pad_val)
-
-            # TODO: has strange restrictions, optimize (e.g. can we avoid requiring 17 leading dimension? we usually use only 1)
-            torch._int_mm(a_part, b.T, out=temp)
-
-            if a.shape[1] < 17:
-                temp = temp[:a.shape[1]]
-
-            res[idx] = temp
-        return res
-
-def int_mmul(self, a: torch.Tensor, b: torch.Tensor):
-    # res = torch.zeros((*a.shape[:-1], b.shape[-1]), dtype=self.accdtype, device=a.device)
-    # idxs = list((x,) for x in range(input.shape[-3]))
-    # for i in range(-4, -len(input.shape) - 1, -1):
-    #     idxs = [(curr, *idx) for idx in idxs for curr in range(input.shape[i])]
-        
-    # for idx in idxs:
-    #     temp = res[idx]
-    #     torch._int_mm(a[idx].type(self.accdtype), b.type(self.accdtype), out=temp)
-    #     res[idx] = temp
-    # return res
-
-    # TODO: handle any dimensions like above
-    assert (len(a.shape) == 3)
-    res = torch.zeros((a.shape[0], a.shape[1], b.shape[-1]), dtype=torch.int32, device=a.device) # TODO: don't hardcode
-    # if a.shape[1] < 16: # TODO: check if more efficient way. int8 mmul seems to require 16 min dimension, maybe cause 16x16x16 tensor core
-    #     a_scratch = torch.zeros(a.shape[0], 16, a.shape[2])
-    for idx in range(a.shape[0]):
-        temp = res[idx]
-        a_part = a[idx]
-        if a.shape[1] < 17:
-            pad_val = (0, 0, 0, 17 - a_part.shape[0])
-            a_part = torch.nn.functional.pad(a_part, pad_val)
-            temp = torch.nn.functional.pad(temp, pad_val)
-
-        # TODO: has strange restrictions, optimize (e.g. can we avoid requiring 17 leading dimension? we usually use only 1)
-        torch._int_mm(a_part, b, out=temp)
-
-        if a.shape[1] < 17:
-            temp = temp[:a.shape[1]]
-
-        res[idx] = temp
-    return res
-
 class Linear(nn.Module):
     def __init__(self, in_features: int, out_features: int, quant_dtype: torch.dtype, bits: int, clip_ratio: float, bias: bool = True, device=None) -> None:
         super().__init__()
@@ -148,17 +85,12 @@ class Linear(nn.Module):
             self.weight = Parameter(torch.empty((out_features, in_features // 2), **factory_kwargs), requires_grad=False)
         else:
             self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs), requires_grad=False)
-        # if bias:
-        #     self.bias = Parameter(torch.empty(out_features, **factory_kwargs), requires_grad=False)
-        # else:
-        #     self.register_parameter('bias', None)
-        # self.reset_parameters()
         if bias:
             raise ValueError("Bias is not yet supported with quantization")
         # TODO: consider choosing the scale dtype
         self.weight_scale = torch.nn.Parameter(torch.empty((out_features, 1), device=device, dtype=torch.float16), requires_grad=False)
         # TODO: support more dtypes and assign correct function (based on self.quant_dtype)
-        self.mmul_func = int_mmul
+        self.mmul_func = torch.ops.quantized.int8_mmul #int_mmul
         # self.int_mmul if self.qdtype in [torch.int8, torch.int16, torch.int32] else self.fp8_mmul_triton if self.qdtype in [torch.float8_e4m3fn] else self.basic_mmul
         self.clip_ratio = clip_ratio
         self.unpack = unpack_int4 if bits == 4 else lambda x: x # TODO: assumes that weights are 4 bit when only activations could be 4-bit (actually why do activations 4-bit at all?)
@@ -167,7 +99,7 @@ class Linear(nn.Module):
         # TODO: check efficiency, had to change order so scale didn't reach inf
         # TODO: check if need cast to fp32 after matmul
         a, a_s = quantize(input, self.quant_dtype, self.bits, dim=-1, sym=True, clip_ratio=self.clip_ratio) # TODO: maybe read from weight?
-        return (self.mmul_func(self, a, self.unpack(self.weight).T).to(torch.float32) * a_s * self.weight_scale.T).to(input.dtype)
+        return (self.mmul_func(a, self.unpack(self.weight).T).to(torch.float32) * a_s * self.weight_scale.T).to(input.dtype) # TODO: mmul_func can return fp32 maybe
     
     def reset_parameters(self) -> None:
         self.weight.zero_()
@@ -210,6 +142,12 @@ class QuantizedTensor:
     
     def expand(self, size: Sequence[int], *, implicit: bool = False) -> "QuantizedTensor":
         return QuantizedTensor(self.value.expand(size, implicit=implicit), self.scale.expand(size, implicit=implicit), self.offset.expand(size, implicit=implicit) if self.offset is not None else None)
+    
+    def clone(self, *, memory_format: Optional[torch.memory_format] = None):
+        return QuantizedTensor(self.value.clone(memory_format=memory_format), self.scale.clone(memory_format=memory_format), self.offset.clone(memory_format=memory_format) if self.offset is not None else None)
+    
+    def detach(self):
+        return QuantizedTensor(self.value.detach(), self.scale.detach(), self.offset.detach() if self.offset is not None else None)
 
 class KVCacheQuantizer:
     def __init__(self, quant_dtype: torch.dtype, bits: int, sym: bool, clip_ratio: float) -> None:
@@ -222,6 +160,20 @@ class KVCacheQuantizer:
         keys = quantize(keys, self.quant_dtype, self.bits, sym=self.sym, dim=-1, clip_ratio=self.clip_ratio)
         values = quantize(values, self.quant_dtype, self.bits, sym=self.sym, dim=-1, clip_ratio=self.clip_ratio)
         return QuantizedTensor(*keys), QuantizedTensor(*values)
+    
+    def cat(self, keys: QuantizedTensor, values: QuantizedTensor, past_keys: QuantizedTensor, past_values: QuantizedTensor) -> Tuple[QuantizedTensor, QuantizedTensor]:
+        # NOTE: this bad casting is pytorch's fault, without the casting torch.compile will not be able to fuse these
+        # into one Triton kernelthis is not necessary for some pytorch2.4 nightly we used but the stable
+        # pytorch 2.4 has compile broken
+
+        new_keys = torch.cat((past_keys.value, keys.value.to(torch.float16)), dim=2).to(torch.uint8)
+        new_values = torch.cat((past_values.value, values.value.to(torch.float16)), dim=2).to(torch.uint8)
+        new_keys_off = torch.cat((past_keys.offset, keys.offset), dim=2)
+        new_values_off = torch.cat((past_values.offset, values.offset), dim=2)
+        new_keys_scale = torch.cat((past_keys.scale, keys.scale), dim=2)
+        new_values_scale = torch.cat((past_values.scale, values.scale), dim=2)
+
+        return QuantizedTensor(new_keys, new_keys_scale, new_keys_off), QuantizedTensor(new_values, new_values_scale, new_values_off)
     
     def dequantize(self, keys: QuantizedTensor, values: QuantizedTensor) -> Tuple[torch.Tensor, torch.Tensor]:
         return keys.dequantize(), values.dequantize()
