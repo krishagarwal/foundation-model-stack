@@ -7,6 +7,7 @@ import torch
 from tqdm import tqdm
 from fms.utils import serialization #load_state_dict
 from safetensors.torch import save_file
+import math
 
 from fms.modules.quantized import quant_dtype_to_torch_dtype, pack_int4
 from fms.modules.rotated import full_normed_right_hadamard
@@ -138,24 +139,25 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
             if pre_rot or post_rot or special_rot_match:
                 val = val.to(torch.float32).cuda() # TODO: consider not hardcoding
                 if pre_rot:
-                    had2, hadk = get_hadK(val.shape[-1])
+                    had2, hadk, scale = get_hadK(val.shape[-1])
                     if hadk is not None:
                         hadk = hadk.cuda()
                         hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt() # TODO: consider fp64 norm
-                    val = full_normed_right_hadamard(val, had2, hadk)
+                    val = full_normed_right_hadamard(val, had2, hadk, scale)
                 if post_rot:
-                    had2, hadk = get_hadK(val.shape[0])
+                    had2, hadk, scale = get_hadK(val.shape[0])
                     if hadk is not None:
                         hadk = hadk.cuda()
                         hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt() # TODO: consider fp64 norm
-                    val = full_normed_right_hadamard(val.T, had2, hadk).T
+                    val = full_normed_right_hadamard(val.T, had2, hadk, scale).T
                 if special_rot:
                     # qkv needs v to have a post rot by head dim
                     if "qkv_fused" in item:
                         head_dim = config.emb_dim // config.nheads
                         # extract v
                         v = val[config.emb_dim * 2:]
-                        v = full_normed_right_hadamard(v.T.contiguous(), head_dim, None).T
+                        scale = 1 / math.sqrt(head_dim)
+                        v = full_normed_right_hadamard(v.T.contiguous(), head_dim, None, scale).T
                         val[config.emb_dim * 2:] = v
 
             val = val.to(dtype).contiguous().cpu()

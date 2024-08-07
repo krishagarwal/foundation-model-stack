@@ -2,10 +2,11 @@
 # adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 
 import torch
+import math
 
 def get_hadK(n):
     if is_pow2(n):
-        return n, None
+        return n, None, 1 / math.sqrt(n)
 
     supported_sizes = [
         (172, get_had172),
@@ -23,7 +24,7 @@ def get_hadK(n):
 
     for size, get_had in supported_sizes:
         if n % size == 0 and is_pow2(n // size):
-            return n // size, get_had()
+            return n // size, get_had(), 1 / math.sqrt(n // size)
     
     raise ValueError(f"Size {n} not supported")
 
