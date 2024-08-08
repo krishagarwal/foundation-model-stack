@@ -209,6 +209,8 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
     from fms.modules import rotated
     assert isinstance(model, LLaMA), "quantized model only supported for LLaMa"
 
+    # TODO: prevent the model from initializing the full unquantized size in VRAM to allow it to initialize on small GPUs which only fit the quantized version
+
     quant_dtype, bits = quant_dtype_to_torch_dtype(qdtype_str)
 
     # TODO: this is a fix so that benchmark_inference.py works without either arg
@@ -236,7 +238,7 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
         model.rot_emb.cached_freqs = old_pos_enc.cached_freqs
         model.rot_emb.max_seq_len_cached = old_pos_enc.max_seq_len_cached
 
-    kv_quantizer = quantized.KVCacheQuantizer(quantized.signed_to_unsigned_dtype(quant_dtype), bits, False, kv_clip_ratio) # TODO: consider allowing option for symmetric kv-cache quantization
+    kv_quantizer = quantized.KVCacheQuantizer(quantized.signed_to_unsigned_dtype(quant_dtype), bits, kv_clip_ratio) # TODO: consider allowing option for symmetric kv-cache quantization
 
     for layer in model.layers:
         layer: LLaMABlock
@@ -263,6 +265,8 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
         ff.reset_parameters = partial(quant_reset_parameters, module=ff)
         ff.wg1_fused = swap_linear(ff.wg1_fused)
         ff.w2 = swap_linear(ff.w2, ff.w2.in_features if rotate else None) # online full rotation before down proj
+    
+    torch.cuda.empty_cache() # TODO: only do if using cuda
 
 def _is_dp(distributed_strategy):
     return distributed_strategy in {"fsdp", "hsdp", "ddp"}

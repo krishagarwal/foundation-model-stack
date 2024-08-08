@@ -403,6 +403,9 @@ class MultiHeadAttention(nn.Module):
             torch.backends.cuda.enable_mem_efficient_sdp(use_mem_efficient)
             torch.backends.cuda.enable_math_sdp(use_math)
         
+        # if self.kv_quantizer is not None:
+            # keys_e, values_e = self.kv_quantizer.dequantize(keys_e, values_e)
+        
         if self.kv_quantizer is None:
             attn = F.scaled_dot_product_attention(
                 queries,
@@ -414,6 +417,13 @@ class MultiHeadAttention(nn.Module):
             )
         else:
             # TODO: does not support explicit mask and dropout
+            # attn = torch.ops.dequant.attn(
+            #     queries,
+            #     keys_e,
+            #     values_e,
+            #     is_causal_mask=is_causal_mask
+            # )
+
             attn = torch.ops.dequant.attn(
                 queries,
                 keys_e.value,

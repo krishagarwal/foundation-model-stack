@@ -181,7 +181,7 @@ print("loading complete on rank", local_rank)
 if args.compile:
     print("compiling model")
     # compiling can make first inference pass slow
-    model.compile(mode=args.compile_mode)
+    model.compile(mode=args.compile_mode, dynamic=True) # TODO: should dynamic=True? speeds up and prevents running out of compile cache (64 max default)
 
 
 def ids_for_prompt(prompt):
@@ -259,6 +259,7 @@ def infer(use_cache, do_sample):
         do_sample=do_sample,
         max_seq_len=max_seq_len,
         extra_kwargs=padding_kwargs,
+        contiguous_cache=args.compile_mode == "reduce-overhead",
     )
     if len(result.shape) == 1:
         result = result.unsqueeze(0)
@@ -273,4 +274,5 @@ use_cache = [
     args.no_use_cache
 ]  # True/False are identical with greedy iff `torch.use_deterministic_algorithms(True)`
 for sample, cache in itertools.product(do_sample, use_cache):
-    infer(cache, sample)
+    for _ in range(3):
+        infer(cache, sample)

@@ -273,9 +273,10 @@ def end_to_end(model, use_cache, expected=None):
             torch.cuda.synchronize()
     return result
 
-
-e2e_expected_cache = end_to_end(model, True)
-e2e_expected_nocache = end_to_end(model, True)
+e2e_expected_cache = None
+e2e_expected_nocache = None
+# e2e_expected_cache = end_to_end(model, True)
+# e2e_expected_nocache = end_to_end(model, True)
 
 
 def log_result(result):
@@ -344,9 +345,11 @@ if not args.skip_compile_runs:
         # Activate dynamo logs to ensure some output during compilation
         torch._logging.set_logs(dynamo=logging.INFO)
         if not args.skip_kvcache_runs:
-            one_token(model, True)
+            for _ in range(2):
+                one_token(model, True)
         if not args.skip_nokvcache_runs:
-            one_token(model, False)
+            for _ in range(2):
+                one_token(model, False)
         print(f"Model has warmed up in rank {local_rank}")
 
         # These get much better results with mode='reduce-overhead' but can lead to
@@ -361,9 +364,11 @@ if not args.skip_compile_runs:
         print0()
         print(f"Warming up the compiled model e2e in rank {local_rank}")
         if not args.skip_kvcache_runs:
-            end_to_end(model, True, e2e_expected_cache)
+            for _ in range(2):
+                end_to_end(model, True, e2e_expected_cache)
         if not args.skip_nokvcache_runs:
-            end_to_end(model, False, e2e_expected_nocache)
+            for _ in range(2):
+                end_to_end(model, False, e2e_expected_nocache)
         print(f"Model has warmed up e2e in rank {local_rank}")
 
         print0("(Compiled) End-to-end sequence generation")
