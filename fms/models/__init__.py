@@ -20,8 +20,6 @@ from fms.distributed.strategy import (
 )
 from fms.utils import serialization
 
-from fms.modules.quantized import quant_dtype_to_torch_dtype
-
 __models: MutableMapping[str, MutableMapping[str, Callable[[], nn.Module]]] = {}
 
 
@@ -203,15 +201,18 @@ def _fsdp_wrap(
 
     return model
 
-def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_clip_ratio: Optional[float], kv_clip_ratio: Optional[float]) -> None:
+def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, device_type: str, activ_clip_ratio: Optional[float], kv_clip_ratio: Optional[float]) -> None:
     from fms.models.llama import LLaMA, LLaMABlock
     from fms.modules import quantized
     from fms.modules import rotated
-    assert isinstance(model, LLaMA), "quantized model only supported for LLaMa"
+    from fms.modules.quantized import quant_dtype_to_torch_dtype
+    if not isinstance(model, LLaMA):
+        raise ValueError("quantized model only supported for LLaMa")
+
+    # TODO: prevent the model from initializing the full unquantized size in VRAM to allow it to initialize on small GPUs which only fit the quantized version
 
     quant_dtype, bits = quant_dtype_to_torch_dtype(qdtype_str)
 
-    # TODO: this is a fix so that benchmark_inference.py works without either arg
     if activ_clip_ratio is None:
         activ_clip_ratio = 1
     if kv_clip_ratio is None:
@@ -236,7 +237,7 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
         model.rot_emb.cached_freqs = old_pos_enc.cached_freqs
         model.rot_emb.max_seq_len_cached = old_pos_enc.max_seq_len_cached
 
-    kv_quantizer = quantized.KVCacheQuantizer(quantized.signed_to_unsigned_dtype(quant_dtype), bits, False, kv_clip_ratio) # TODO: consider allowing option for symmetric kv-cache quantization
+    kv_quantizer = quantized.KVCacheQuantizer(quantized.signed_to_unsigned_dtype(quant_dtype), bits, kv_clip_ratio)
 
     for layer in model.layers:
         layer: LLaMABlock
@@ -256,13 +257,15 @@ def _quantize_inplace(model: nn.Module, qdtype_str: str, rotate: bool, activ_cli
             attn.in_proj.query = swap_linear(attn.in_proj.query)
             attn.in_proj.key = swap_linear(attn.in_proj.key)
             attn.in_proj.value = swap_linear(attn.in_proj.value)
-        # TODO: check if there's a way to do this without hardcoding
         attn.reset_parameters = partial(quant_reset_parameters, module=attn)
         
         ff = layer.ff_sub_layer
         ff.reset_parameters = partial(quant_reset_parameters, module=ff)
         ff.wg1_fused = swap_linear(ff.wg1_fused)
         ff.w2 = swap_linear(ff.w2, ff.w2.in_features if rotate else None) # online full rotation before down proj
+    if device_type == "cuda":
+        # free up mem saved by quantization
+        torch.cuda.empty_cache()
 
 def _is_dp(distributed_strategy):
     return distributed_strategy in {"fsdp", "hsdp", "ddp"}
@@ -370,7 +373,7 @@ def get_model(
         fms_model = model_wrap(fms_model)
 
     if quant_dtype:
-        _quantize_inplace(fms_model, quant_dtype, rotate, activ_clip_ratio, kv_clip_ratio)
+        _quantize_inplace(fms_model, quant_dtype, rotate, device_type, activ_clip_ratio, kv_clip_ratio)
 
     if len(lazy_sd):
         serialization.load_state_dict_into_model(

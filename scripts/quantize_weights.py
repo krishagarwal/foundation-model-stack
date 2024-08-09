@@ -5,13 +5,14 @@ import fms.models
 from fms.utils.serialization import _get_adapter
 import torch
 from tqdm import tqdm
-from fms.utils import serialization #load_state_dict
+from fms.utils import serialization
 from safetensors.torch import save_file
 import math
 
 from fms.modules.quantized import quant_dtype_to_torch_dtype, pack_int4
 from fms.modules.rotated import full_normed_right_hadamard
 from fms.utils.special_had import get_hadK
+# TODO: consider using fp64 for intermediate values since it's offline
 
 def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16, dim=-1, device=None) -> tuple[torch.Tensor, torch.Tensor]:
     if device is None:
@@ -24,12 +25,13 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
     mag = mag.clamp(min=1e-5)
     scale = (mag / max_qint).to(scaledtype)
 
+    # automatically find best clipping ratio to quantize this weight tensor
     err_shape = list(weight.shape)
     err_shape[dim] = 1 # weight shape except for dim, since only 1 scale along dim
     best_err = torch.full(err_shape, torch.inf, device=device)
     steps = 100
     min_frac = 0.2
-    for i in range(int((1-min_frac) * steps)): # min_frac, 100: min % to shrink to, how many steps to cut max into
+    for i in range(int((1-min_frac) * steps)): # (min_frac, steps) = (min % to shrink to, how many steps to cut max into), set to match QuaRot
         mag1 = (1 - i / steps) * mag
 
         scale1 = mag1 / max_qint # has right shape based on dim
@@ -37,7 +39,7 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
         if qdtype in [torch.int8, torch.int16]:
             weight1 = weight1.clamp(min=min_qint, max=max_qint).round()
         weight1 = weight1.type(qdtype)
-        weight1_comp = (scale1 * (weight1)).to(dtype) # TODO: consider fp64 to compare
+        weight1_comp = (scale1 * (weight1)).to(dtype)
 
         diff = weight - weight1_comp
         err = diff.abs().pow(2.4).sum(dim, keepdim=True)
@@ -52,36 +54,31 @@ def quantize(weight: torch.Tensor, qdtype, bits, scaledtype, dtype=torch.float16
     weight = weight.type(qdtype)
     return weight.to(device), scale.to(device)
 
-def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype_str: str, rotate: bool, config: llama.LLaMAConfig):
+def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype_str: str, rotate: bool, config: llama.LLaMAConfig, device: str):
     save_end = "weights.safetensors"
-    if not save_path.endswith("/" + save_end): # TODO: clean up
-        if save_path.endswith("/"):
-            save_path = save_path + save_end
-        else:
-            save_path = save_path + "/" + save_end
+    save_path = os.path.join(save_path, save_end)
 
     quant_dtype, bits = quant_dtype_to_torch_dtype(quant_dtype_str)
 
-    # TODO: support distributed, etc.? function accepts those args
+    # TODO: support distributed for larger models. load_state_dict takes distributed arg
     print(f"Loading [lazy] state dict from: {load_path}")
     lazy_sd = serialization.load_state_dict(load_path)
     save_sd = {}
 
-    # 1. Get the adapter from checkpoint sd to fms sd
+    # TODO: lazy loading is broken for the hf converter in fms, if it wasn't, we could lazy load here
+
+    # get the adapter from checkpoint sd to fms sd
     adapter = _get_adapter("llama", source)
     lazy_sd = adapter(lazy_sd)
-    # # name map to avoid touching all lazy tensors
-    # name_map = {key: key for key in lazy_sd.keys()}
-    # name_map = adapter(name_map) # get new names
-    # name_map = {name_old: name_new for name_new, name_old in name_map} # swap map
 
     def match(match_list: list[str], target: str):
         """Check if any of `match_list` is in `target`"""
         for m in match_list:
             if m in target:
-                return m # TODO: ugly, but string should evaluate to True
-        return False
+                return m
+        return None
 
+    # many of these weights are fused
     quantize_match = [
         # "query"
         "qkv_fused",
@@ -125,11 +122,11 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
         if rotate:
             dtype = val.dtype
             # absorb if needed
-            if match(absorb_keys, item):
+            if match(absorb_keys, item) is not None:
                 dependence = match(absorb_keys, item)
                 dependency_name = item.replace(dependence, absorptions[dependence])
                 val2 = lazy_sd.get(dependency_name)
-                # absorb, works in all 3
+                # absorb, works in all 3 of q,k,v even if fused
                 val = (val2.view(1, -1).to(torch.float64) * val.to(torch.float64))
 
             pre_rot = match(pre_rot_match, item)
@@ -137,18 +134,18 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
             special_rot = match(special_rot_match, item)
 
             if pre_rot or post_rot or special_rot_match:
-                val = val.to(torch.float32).cuda() # TODO: consider not hardcoding
+                val = val.to(torch.float32).to(device) # NOTE: fp32 is highest precision for fast hadamard transform library
                 if pre_rot:
                     had2, hadk, scale = get_hadK(val.shape[-1])
                     if hadk is not None:
                         hadk = hadk.cuda()
-                        hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt() # TODO: consider fp64 norm
+                        hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt()
                     val = full_normed_right_hadamard(val, had2, hadk, scale)
                 if post_rot:
                     had2, hadk, scale = get_hadK(val.shape[0])
                     if hadk is not None:
                         hadk = hadk.cuda()
-                        hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt() # TODO: consider fp64 norm
+                        hadk = hadk * torch.tensor(hadk.shape[0], device='cuda', dtype=hadk.dtype).rsqrt()
                     val = full_normed_right_hadamard(val.T, had2, hadk, scale).T
                 if special_rot:
                     # qkv needs v to have a post rot by head dim
@@ -162,14 +159,14 @@ def load_quantize_store(load_path: str, save_path: str, source: str, quant_dtype
 
             val = val.to(dtype).contiguous().cpu()
 
-
-        # item = name_map[item_old]
-        if match(quantize_match, item):
+        if match(quantize_match, item) is not None:
             assert item.endswith('.weight')
             item_s = item.replace('.weight', '.weight_scale')
             valq, val_s = quantize(val.to('cuda'), quant_dtype, bits, torch.float16, dim=-1)
-            if bits == 4: # TODO: this case is kind of hard-coded, look into better way
+            if bits == 4:
                 valq = pack_int4(valq)
+            elif bits != 8:
+                raise ValueError("currently only supports 8 and 4 bit quantization")
             valq, val_s = valq.to('cpu'), val_s.to('cpu')
             save_sd[item] = valq
             save_sd[item_s] = val_s
@@ -222,11 +219,17 @@ if __name__ == "__main__":
         type=str,
         help="enables quantization to the specified dtype",
         default="",
-        choices=["", "int8", "int4-fake"],
+        choices=["", "int8", "int4"],
     )
     parser.add_argument(
         "--rotate",
         action="store_true",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cpu", "cuda"],
     )
 
     args = parser.parse_args()
@@ -234,4 +237,4 @@ if __name__ == "__main__":
     # sus thing to grab model config from factory
     config = fms.models.__models[args.architecture][args.variant].config
 
-    load_quantize_store(args.load_path, args.save_path, args.model_source, args.quant_dtype, args.rotate, config)
+    load_quantize_store(args.load_path, args.save_path, args.model_source, args.quant_dtype, args.rotate, config, args.device)

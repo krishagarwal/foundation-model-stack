@@ -19,12 +19,12 @@ def full_normed_right_hadamard(a: torch.Tensor, power_of_two_size, hadK, scale: 
     a = a.view(orig_shape)
     return a
 
+# NOTE: only handles powers of 2, used for hadamard of size num_heads
 def partial_normed_right_hadamard(a: torch.Tensor, completed_size, remaining_size, scale):
-    # TODO: handle remaining size not being power of 2
     orig_shape = a.shape
     a = a.view(-1, remaining_size, completed_size).transpose(-1, -2)
     a = torch.ops.hadamard.transform(a, scale=scale)
-    a = a.transpose(-1, -2).reshape(orig_shape) # TODO: can we do a view?
+    a = a.transpose(-1, -2).reshape(orig_shape)
     return a
 
 class Linear(quantized.Linear):
@@ -47,8 +47,8 @@ class RotaryEmbedding(positions.RotaryEmbedding):
     def __init__(self, had_size: int, dim: int, ratio: float = 10, max_seq_len=2048, ntk_scaling=False):
         super().__init__(dim, ratio, max_seq_len, ntk_scaling)
         pow2size, hadK, scale = get_hadK(had_size)
-        assert hadK is None # TODO: temporary fix since we can't cast hadK to a device without knowing the device upfront
-        # TODO: consider supporting partial hadamard
+        if hadK is not None:
+            raise ValueError("Expected headdim to be power of 2, non-power-of-2 hadamard not supported here yet")
         self.rotate = functools.partial(full_normed_right_hadamard, power_of_two_size=pow2size, hadK=hadK, scale=scale)
     
     def adjusted_qk(

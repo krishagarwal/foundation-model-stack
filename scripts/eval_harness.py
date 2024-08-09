@@ -88,6 +88,29 @@ parser.add_argument(
     default=None,
     help="Number of examples in few-shot context",
 )
+parser.add_argument(
+    "--quant_dtype",
+    type=str,
+    help="enables quantization to the specified dtype",
+    default="",
+    choices=["", "int8", "int4"],
+)
+parser.add_argument(
+    "--activ_clip_ratio",
+    type=float,
+    help="ratio for scale of activations when quantized (typically <= 1)",
+    default=1,
+)
+parser.add_argument(
+    "--kv_clip_ratio",
+    type=float,
+    help="ratio for scale of keys and values when quantized for caching (typically <= 1)",
+    default=1,
+)
+parser.add_argument(
+    "--rotate",
+    action="store_true",
+)
 
 args = parser.parse_args()
 
@@ -127,6 +150,10 @@ model = get_model(
     source=args.model_source,
     distributed_strategy=distr_param,
     group=dist.group.WORLD,
+    quant_dtype=args.quant_dtype,
+    rotate=args.rotate,
+    activ_clip_ratio=args.activ_clip_ratio,
+    kv_clip_ratio=args.kv_clip_ratio
 )
 tokenizer = tokenizers.get_tokenizer(args.tokenizer)
 model.eval()

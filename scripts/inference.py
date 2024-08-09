@@ -100,19 +100,19 @@ parser.add_argument(
     type=str,
     help="enables quantization to the specified dtype",
     default="",
-    choices=["", "int8", "int4-fake"],
+    choices=["", "int8", "int4"],
 )
 parser.add_argument(
     "--activ_clip_ratio",
     type=float,
     help="ratio for scale of activations when quantized (typically <= 1)",
-    default=0.9, # TODO: check if setting a good but not None-like default is proper fms style
+    default=1,
 )
 parser.add_argument(
     "--kv_clip_ratio",
     type=float,
     help="ratio for scale of keys and values when quantized for caching (typically <= 1)",
-    default=0.95, # TODO: check if setting a good but not None-like default is proper fms style
+    default=1,
 )
 parser.add_argument(
     "--rotate",
