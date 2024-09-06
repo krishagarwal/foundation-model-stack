@@ -53,12 +53,13 @@ static void inline wait_group() {
 #define n_n(i) ((fp16_1n[i] & 0x0000FFFF) | fp16_1n[i] << 16)
 
 template<int num_chunks, int warps_per_block, int log_had_size>
-__global__ void __launch_bounds__(32 * warps_per_block, MIN(24, 48 / warps_per_block))
+// TODO: check if blocks per SM is correctly calculated
+__global__ void __launch_bounds__(32 * warps_per_block, MIN(MIN((cudaSharedmemCarveoutMaxShared * 1024) / (num_chunks * warps_per_block * 128 * 4), 24), 48 / warps_per_block))//MIN(24, 48 / warps_per_block))
 // a is column major, b is row major
 wmma_ker(half* __restrict__ a) {
     uint blockid = blockIdx.x * warps_per_block + threadIdx.x / 32;
     uint threadid = threadIdx.x % 32;
-    __shared__ b32 bfrag_arr[num_chunks * warps_per_block * 128];
+    extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
 
     a += blockid * num_chunks * 256;
     b32* a_ptr = ((b32*) a) + threadid * 4;
@@ -69,7 +70,7 @@ wmma_ker(half* __restrict__ a) {
         // for (int j = 0; j < 4; j++) {
             // half* a_loc = (half*) (&((b32*)a)[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8]);
             // half* b_frag_loc = (half*) (&b_frag_ptr[j]);
-            size_t shared_ptr = __cvta_generic_to_global(b_frag_ptr);
+            size_t shared_ptr = __cvta_generic_to_shared(b_frag_ptr);
             asm volatile(
                 "cp.async.cg.shared.global.L2::256B [%0], [%1], 16;\n"
                 "cp.async.commit_group;\n"
@@ -201,6 +202,10 @@ wmma_ker(half* __restrict__ a) {
             case 1: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 2)); break;
             case 2: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 3)); break;
             case 3: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 4)); break;
+            case 4: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 5)); break;
+            case 5: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 6)); break;
+            case 6: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 7)); break;
+            case 7: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 8)); break;
         }
         // asm("cp.async.wait_group %0;\n" :: "n"(num_chunks - k - 1));
         #pragma unroll
@@ -257,8 +262,10 @@ int main()
     uint32_t vector_size = 256;
     constexpr uint32_t log_had_size = 8;
     uint32_t cols = 4096 * 16;
-    constexpr int chunks_per_warp = 2;
-    constexpr int warps_per_block = 1;
+    // for size 256, use (2, 1)
+    // for size 32k use (8, 16)
+    constexpr int chunks_per_warp = 8;
+    constexpr int warps_per_block = 16;
 
     half* ptr = (half*)malloc(vector_size * cols * sizeof(half)); // col major
 
@@ -299,11 +306,20 @@ int main()
 
     cudaMemcpy(dev_had_16, had_16, sizeof(had_16), cudaMemcpyKind::cudaMemcpyHostToDevice);
     printf("cols: %d\n", cols);
-    wmma_ker<chunks_per_warp, warps_per_block, log_had_size><<<dim3(((cols / 16) * (vector_size / 16)) / chunks_per_warp / warps_per_block, 1), dim3(32 * warps_per_block)>>>(dev_ptr);//, log_had_size);
-    auto status = cudaDeviceSynchronize();
+    void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size>;
+    cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
+    wmma_ker<chunks_per_warp, warps_per_block, log_had_size><<<dim3(((cols / 16) * (vector_size / 16)) / chunks_per_warp / warps_per_block, 1), dim3(32 * warps_per_block), 65536>>>(dev_ptr);//, log_had_size);
+    auto status = cudaGetLastError();
     if (status != cudaSuccess) {
         printf("error\n");
-        printf(cudaGetErrorString(status));
+        printf("CUDA Error %d: %s", status, cudaGetErrorString(status));
+        printf("\n");
+        return 1;
+    }
+    status = cudaDeviceSynchronize();
+    if (status != cudaSuccess) {
+        printf("error\n");
+        printf("CUDA Sync Error %d: %s", status, cudaGetErrorString(status));
         printf("\n");
         return 1;
     }
