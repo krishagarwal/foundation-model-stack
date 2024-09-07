@@ -2,10 +2,12 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include <mma.h>
-using namespace nvcuda;
+// using namespace nvcuda;
 
 #include <cuda_fp16.h>
 #include <cuda/annotated_ptr>
+#include <pybind11/pybind11.h>
+
 
 #ifndef __CUDACC__
 #define __launch_bounds__(x,y)
@@ -61,6 +63,7 @@ wmma_ker(half* __restrict__ a) {
     uint threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
 
+    // start async load from global to shared
     a += blockid * num_chunks * 256;
     b32* a_ptr = ((b32*) a) + threadid * 4;
     b32* b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128 + threadid * 4;
@@ -85,13 +88,13 @@ wmma_ker(half* __restrict__ a) {
         b_frag_ptr += 128;
     }
 
+    // generate hadamard 16x16 (up to 2 of them)
     constexpr uint16_t fp16_1p[4] = {0b0011100110101000, 0b0011100000000000, 0b0011010110101000, 0b0011010000000000};// 0b0011110000000000;
     constexpr uint16_t fp16_1n[4] = {0b1011100110101000, 0b1011100000000000, 0b1011010110101000, 0b1011010000000000};// 0b1011110000000000;
     constexpr b32 p_p[4] = {p_p(0), p_p(1), p_p(2), p_p(3)};
     constexpr b32 p_n[4] = {p_n(0), p_n(1), p_n(2), p_n(3)};
     constexpr b32 n_p[4] = {n_p(0), n_p(1), n_p(2), n_p(3)};
     constexpr b32 n_n[4] = {n_n(0), n_n(1), n_n(2), n_n(3)};
-
     const b32 had_16_p1[4][4] = {
         {
             0b10001000010001000010001000010001,
@@ -144,7 +147,6 @@ wmma_ker(half* __restrict__ a) {
             0b00001111010110100011110001101001
         }
     };
-
     const b32 had_16_mask[3][4] = {
         {
             0b10001000010001000010001000010001,
@@ -165,7 +167,6 @@ wmma_ker(half* __restrict__ a) {
             0b11111111111111111111111111111111
         }
     };
-
     b32 had_frag[8];
     int remaining_log_had_size2 = log_had_size;
     #pragma unroll
@@ -189,9 +190,9 @@ wmma_ker(half* __restrict__ a) {
         if(remaining_log_had_size2 <= 0) break;
     }
     
+    // do the multiplication
     int row = threadid % 4;
     int col = threadid / 4;
-    
     b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128;
     #pragma unroll
     for (int k = 0; k < num_chunks; k++) {
@@ -348,4 +349,123 @@ int main()
 
     printf("bye\n");
     return 0;
+}
+
+template <int chunks_per_warp, int warps_per_block, int log_had_size>
+void __forceinline__ run_matmul_kernel (half* a_mat, int num_chunks) {
+    int shared_size = chunks_per_warp * warps_per_block * 128 * 4;
+    dim3 grid_size = num_chunks / chunks_per_warp / warps_per_block;
+    dim3 block_size = 32 * warps_per_block;
+    if (shared_size > 48 * 1024) {
+        void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size>;
+        cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
+    }
+    if (num_chunks % (chunks_per_warp * warps_per_block) != 0) {
+        pybind11::print("chunks not divisible by chunks per block");
+        return;
+    }
+    wmma_ker<chunks_per_warp, warps_per_block, log_had_size><<<dim3(grid_size), dim3(block_size), shared_size>>>((half*) a_mat);
+}
+
+void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
+    void* a_mat = (void*) a;
+    uint32_t num_chunks = (M * N + 255) / 256;
+    if ((M * N) % 256 != 0) {
+        size_t old_size = M * N * sizeof(half), new_size = num_chunks * 256 * sizeof(half);
+        cudaMalloc(&a_mat, new_size);
+        cudaMemcpy(a_mat, (void*) a, old_size, cudaMemcpyKind::cudaMemcpyDeviceToDevice);
+        cudaMemset((half*) a_mat + M * N, 0, new_size - old_size);
+    }
+    // cudaMemset((half*) a_mat, 512, 0); // TODO: for debug
+    // for size 256, use (2, 1)
+    // for size 32k use (8, 16)
+    constexpr int chunks_per_warp_small = 1;// 8;
+    constexpr int warps_per_block_small = 1;//2;//16;
+    constexpr int chunks_per_warp_large = 2;
+    constexpr int warps_per_block_large = 1;
+
+    // constexpr int shared_size = chunks_per_warp * warps_per_block * 128 * 4;
+
+    // constexpr int block_size = 32 * warps_per_block;
+    // int chunks_per_block = chunks_per_warp * warps_per_block;
+    // int grid_size = num_chunks / chunks_per_warp / warps_per_block;
+    
+    // pybind11::print("log_had_size: \n", log_had_size);
+    // pybind11::print("grid_size: \n", grid_size);
+    // pybind11::print("block_size: \n", block_size);
+    if (M * N <= 256) {
+        switch (log_had_size) {
+            case 1: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 1>((half*) a_mat, num_chunks); break;
+            case 2: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 2>((half*) a_mat, num_chunks); break;
+            case 3: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 3>((half*) a_mat, num_chunks); break;
+            case 4: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 4>((half*) a_mat, num_chunks); break;
+            case 5: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 5>((half*) a_mat, num_chunks); break;
+            case 6: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 6>((half*) a_mat, num_chunks); break;
+            case 7: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 7>((half*) a_mat, num_chunks); break;
+            case 8: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 8>((half*) a_mat, num_chunks); break;
+            default:
+                pybind11::print("Invalid log_had_size: %d\n", log_had_size);
+                return;
+        }
+    } else {
+        switch (log_had_size) {
+            case 1: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 1>((half*) a_mat, num_chunks); break;
+            case 2: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 2>((half*) a_mat, num_chunks); break;
+            case 3: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 3>((half*) a_mat, num_chunks); break;
+            case 4: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 4>((half*) a_mat, num_chunks); break;
+            case 5: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 5>((half*) a_mat, num_chunks); break;
+            case 6: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 6>((half*) a_mat, num_chunks); break;
+            case 7: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 7>((half*) a_mat, num_chunks); break;
+            case 8: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 8>((half*) a_mat, num_chunks); break;
+            case 9: run_matmul_kernel<2, 1, 9>((half*) a_mat, num_chunks); break;
+            case 10: run_matmul_kernel<2, 2, 10>((half*) a_mat, num_chunks); break;
+            case 11: run_matmul_kernel<2, 4, 11>((half*) a_mat, num_chunks); break;
+            case 12: run_matmul_kernel<2, 8, 12>((half*) a_mat, num_chunks); break;
+            case 13: run_matmul_kernel<2, 16, 13>((half*) a_mat, num_chunks); break;
+            case 14: run_matmul_kernel<4, 16, 14>((half*) a_mat, num_chunks); break;
+            case 15: run_matmul_kernel<8, 16, 15>((half*) a_mat, num_chunks); break;
+            default:
+                pybind11::print("Invalid log_had_size: %d\n", log_had_size);
+                return;
+        }
+    }
+
+    auto status = cudaGetLastError();
+    auto status1 = cudaDeviceSynchronize();
+    if (status != cudaSuccess || status1 != cudaSuccess) {
+        // pybind11::printf("error\n");
+        if (status != cudaSuccess) pybind11::print("CUDA Error %d: %s", status, cudaGetErrorString(status));
+        if (status1 != cudaSuccess) pybind11::print("CUDA Sync Error %d: %s", status1, cudaGetErrorString(status1));
+        pybind11::print("\n");
+        pybind11::print("log_had_size: \n", log_had_size);
+        pybind11::print("num_chunks: \n", num_chunks);
+        // pybind11::print("grid_size: \n", grid_size);
+        // pybind11::print("block_size: \n", block_size);
+        return;
+    }
+
+    // pybind11::print("bye\n");
+    // half* a_cpu = (half*)malloc(M * N * sizeof(half));
+    // cudaMemcpy(a_cpu, (void*) a_mat, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+    // pybind11::print("bye: \n", M, N, (double)(((half*) a_cpu)[0]));
+
+    if ((uint64_t) a_mat != a) {
+        cudaMemcpy((void*) a, a_mat, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToDevice);
+        cudaFree(a_mat);
+    }
+
+    // // TODO: for debug
+    // pybind11::print("bye\n");
+    // half* a_cpu = (half*)malloc(M * N * sizeof(half));
+    // cudaMemcpy(a_cpu, (void*) a, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+    // pybind11::print("bye: \n", M, N, (uint32_t)(((half*) a_cpu)[0]));
+    // cudaMemset((half*) a, 0, M * N * sizeof(half));
+    // cudaMemcpy(a_cpu, (void*) a, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+    // pybind11::print("bye: \n", M, N, (uint32_t)(((half*) a_cpu)[0]));
+}
+
+namespace py = pybind11;
+PYBIND11_MODULE(tensor_core_had_async, m) {
+    m.doc() = "fast hadamard transform module";
+    m.def("fast_had_trans_async", &fast_had_trans, "A function to perform a fast hadamard transform", py::arg("a"), py::arg("M"), py::arg("N"), py::arg("log_had_size"));
 }
