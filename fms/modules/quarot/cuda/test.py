@@ -5,7 +5,7 @@ import math
 import tensor_core_had_async
 
 # hadamard sizes
-test_sizes_m = [2, 4, 8, 16, 32, 64, 128, 256]#, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+test_sizes_m = [2, 4, 8, 16, 32, 64, 128, 256, 4096, 8192, 16384, 32768]#, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 # batch sizes
 test_sizes_n = [1 << i for i in range(25)] # 32M max
 max_elements = 64 * (1 << 20)
@@ -18,23 +18,28 @@ failed_tests = 0
 def get_scale(size):
     return math.sqrt(1 / size)
 
-truth_hadamards = [torch.tensor(scipy.linalg.hadamard(size), device='cuda', dtype=torch.float16) * get_scale(size) for size in test_sizes_m]
+truth_hadamards = [(torch.tensor(scipy.linalg.hadamard(size), device='cuda', dtype=torch.float32) * get_scale(size)).to(torch.float16) for size in test_sizes_m]
 
 def truth_hadamard_transform(a: torch.Tensor):
-    # return a @ truth_hadamards[int(a.shape[1].bit_length() - 2)]
+    # target_index = -1
+    # for i in range(len(test_sizes_m)):
+    #     if test_sizes_m[i] == a.shape[1]:
+    #         target_index = i
+    #         break
+    # return (a @ truth_hadamards[int(target_index)]).T
     return hadamard_transform(a.clone(), get_scale(a.shape[1])).T
 
 def test_hadamard_transform(a: torch.Tensor):
-    # return hadamard_transform(a, get_scale(a.shape[1]))
-    # TODO: add cp_async_test
-    a_clone = torch.empty(a.shape, device='cuda', dtype=torch.float16)
-    a_clone.copy_(a)
-    tensor_core_had_async.fast_had_trans_async(a_clone.data_ptr(), a.shape[0], a.shape[1], int(math.log2(a.shape[1])))
-    return a_clone.T
+    return hadamard_transform(a, get_scale(a.shape[1])).T
+    # a_clone = torch.empty(a.shape, device='cuda', dtype=torch.float16)
+    # a_clone.copy_(a)
+    # tensor_core_had_async.fast_had_trans_async(a_clone.data_ptr(), a.shape[0], a.shape[1], int(math.log2(a.shape[1])))
+    # return a_clone.T
 
 torch.manual_seed(0)
 
 for m in test_sizes_m:
+    print(f'Testing size {m}xN')
     for n in test_sizes_n:
         if m * n > max_elements:
             tests_done += runs_per_size
@@ -44,8 +49,8 @@ for m in test_sizes_m:
 
         a = torch.randn((m, n), device='cuda', dtype=torch.float16)
         # a = torch.zeros((m, n), device='cuda', dtype=torch.float16)
-        for i in range(min(a.shape[0], a.shape[1])):
-            a[i, i] = 1.0
+        # for i in range(min(a.shape[0], a.shape[1])):
+        #     a[i, i] = 1.0
         for i in range(runs_per_size):
             # run test here
             truth = truth_hadamard_transform(a.T)
@@ -67,6 +72,9 @@ for m in test_sizes_m:
                 max_diff = torch.max(diff)
                 print(f'Max diff: {max_diff}')
                 print(f'Max diff index: {torch.argmax(diff)}')
+                diff_input = torch.abs(a - result)
+                max_diff_input = torch.max(diff_input)
+                print(f'Max diff input: {max_diff_input}')
                 print('')
                 exit(1)
                 # failed_tests += 1

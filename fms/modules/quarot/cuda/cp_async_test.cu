@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include <mma.h>
-// using namespace nvcuda;
 
 #include <cuda_fp16.h>
 #include <cuda/annotated_ptr>
@@ -63,27 +62,18 @@ wmma_ker(half* __restrict__ a) {
     uint threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
 
-    // start async load from global to shared
+    half* orig_a = a;
     a += blockid * num_chunks * 256;
     b32* a_ptr = ((b32*) a) + threadid * 4;
     b32* b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128 + threadid * 4;
     #pragma unroll
     for (int k = 0; k < num_chunks; k++) {
-        // #pragma unroll
-        // for (int j = 0; j < 4; j++) {
-            // half* a_loc = (half*) (&((b32*)a)[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8]);
-            // half* b_frag_loc = (half*) (&b_frag_ptr[j]);
-            size_t shared_ptr = __cvta_generic_to_shared(b_frag_ptr);
-            asm volatile(
-                "cp.async.cg.shared.global.L2::256B [%0], [%1], 16;\n"
-                "cp.async.commit_group;\n"
-                :: "l"(shared_ptr), "l"(a_ptr)
-            );
-            // #pragma unroll
-            // for (int j = 0; j < 4; j++) {
-            //     *(b_frag_ptr + j) = *(a_ptr + j);
-            // }
-        // }
+        size_t shared_ptr = __cvta_generic_to_shared(b_frag_ptr);
+        asm volatile(
+            "cp.async.cg.shared.global.L2::256B [%0], [%1], 16;\n"
+            "cp.async.commit_group;\n"
+            :: "l"(shared_ptr), "l"(a_ptr)
+        );
         a_ptr += 128;
         b_frag_ptr += 128;
     }
@@ -168,7 +158,7 @@ wmma_ker(half* __restrict__ a) {
         }
     };
     b32 had_frag[8];
-    int remaining_log_had_size2 = log_had_size;
+    int remaining_log_had_size2 = (log_had_size - 1) % 8 + 1;
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         int c_log_h = min(4, remaining_log_had_size2);
@@ -193,62 +183,117 @@ wmma_ker(half* __restrict__ a) {
     // do the multiplication
     int row = threadid % 4;
     int col = threadid / 4;
-    b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128;
+    
     #pragma unroll
-    for (int k = 0; k < num_chunks; k++) {
-        b32 b_frag[4];
-        // TODO: bad fix for k not being recognized as a constexpr
-        switch(k) {
-            case 0: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 1)); break;
-            case 1: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 2)); break;
-            case 2: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 3)); break;
-            case 3: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 4)); break;
-            case 4: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 5)); break;
-            case 5: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 6)); break;
-            case 6: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 7)); break;
-            case 7: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 8)); break;
-        }
-        // asm("cp.async.wait_group %0;\n" :: "n"(num_chunks - k - 1));
+    for (int l = 0; l < 2; l++) {
+        // TODO: stride?
+        b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * (l == 0 ? 128 : (128 >> (log_had_size - 8))); // TODO: works for >=16(?) but not for <16 remaining had size
         #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            // b32* a_loc = &((b32*)(a + 256))[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8];
-            // asm(
-            //     "ld.global.L2::256B.u32 %0, [%1];\n" : "=r"(b_frag[j + 4 * (k + 1)]) : "l"(a_loc)
-            // );
-            b_frag[j] = b_frag_ptr[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8];
-        }
-
-        int remaining_log_had_size = log_had_size;
-
-        #pragma unroll
-        for(int i = 0; i < 2; i++) {
-            int c_log_h = min(4, remaining_log_had_size);
-            mma_m16_n16_k16_fp16_fp16_fp16_noacc(had_frag[i * 4 + 0], had_frag[i * 4 + 1], had_frag[i * 4 + 2], had_frag[i * 4 + 3], b_frag[0], b_frag[1], b_frag[2], b_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3]);
-
-            remaining_log_had_size -= 4;
-            if (remaining_log_had_size <= 0 && i == 0) {
-                // TODO: consider different storing so no need for transpose
-                matrix_transpose_m8_n8_fp16_inplace(b_frag[0]);
-                matrix_transpose_m8_n8_fp16_inplace(b_frag[1]);
-                matrix_transpose_m8_n8_fp16_inplace(b_frag[2]);
-                matrix_transpose_m8_n8_fp16_inplace(b_frag[3]);
-            } else {
-                // swap and use output directly as b_frag for next iteration as an actually free transpose
-                b32 temp = b_frag[1];
-                b_frag[1] = b_frag[2];
-                b_frag[2] = temp;
+        for (int k = 0; k < num_chunks; k++) {
+            b32 b_frag[4];
+            
+            if (l == 0) {
+                // TODO: bad fix for k not being recognized as a constexpr
+                switch(k) {
+                    case 0: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 1)); break;
+                    case 1: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 2)); break;
+                    case 2: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 3)); break;
+                    case 3: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 4)); break;
+                    case 4: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 5)); break;
+                    case 5: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 6)); break;
+                    case 6: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 7)); break;
+                    case 7: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 8)); break;
+                }
+                // asm("cp.async.wait_group %0;\n" :: "n"(num_chunks - k - 1));
             }
 
-            if(remaining_log_had_size <= 0) break;
-        }
+            int pending_log_had_size = log_had_size - l * 8;
 
-        #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            ((b32*)a)[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8] = b_frag[j];
-        }
+            #pragma unroll
+            for (int j = 0; j < 4; j++) {
+                // b32* a_loc = &((b32*)(a + 256))[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8];
+                // asm(
+                //     "ld.global.L2::256B.u32 %0, [%1];\n" : "=r"(b_frag[j + 4 * (k + 1)]) : "l"(a_loc)
+                // );
+                if (l == 0) {
+                    b_frag[j] = b_frag_ptr[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8];
+                } else {
+                    int colidx = col >> (pending_log_had_size - 4);
+                    int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+                    // TODO: stride
+                    b_frag[j] = b_frag_ptr[rowidx * 128 + colidx];
+                }
+            }
 
-        a += 256; // move on to next chunk by skipping 256 elements in fp16
-        b_frag_ptr += 128;
+            if (l == 1) {
+                b32 f0 = ((b_frag[1] & 0xFFFF) << 16) | (b_frag[0] & 0xFFFF);
+                b32 f1 = ((b_frag[3] & 0xFFFF) << 16) | (b_frag[2] & 0xFFFF);
+                b32 f2 = (b_frag[1] & 0xFFFF0000) | (b_frag[0] >> 16);
+                b32 f3 = (b_frag[3] & 0xFFFF0000) | (b_frag[2] >> 16);
+                b_frag[0] = f0;
+                b_frag[1] = f1;
+                b_frag[2] = f2;
+                b_frag[3] = f3;
+            }
+
+            int remaining_log_had_size = log_had_size - l * 8;
+
+            #pragma unroll
+            for(int i = 0; i < 2; i++) {
+                int had_off = (remaining_log_had_size < 4 && log_had_size > 4) ? 4 : 0;
+                mma_m16_n16_k16_fp16_fp16_fp16_noacc(had_frag[had_off + 0], had_frag[had_off + 1], had_frag[had_off + 2], had_frag[had_off + 3], b_frag[0], b_frag[1], b_frag[2], b_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3]);
+
+                remaining_log_had_size -= 4;
+                if (remaining_log_had_size <= 0 && i == 0) {
+                    // TODO: consider different storing so no need for transpose
+                    matrix_transpose_m8_n8_fp16_inplace(b_frag[0]);
+                    matrix_transpose_m8_n8_fp16_inplace(b_frag[1]);
+                    matrix_transpose_m8_n8_fp16_inplace(b_frag[2]);
+                    matrix_transpose_m8_n8_fp16_inplace(b_frag[3]);
+                } else {
+                    // swap and use output directly as b_frag for next iteration as an actually free transpose
+                    b32 temp = b_frag[1];
+                    b_frag[1] = b_frag[2];
+                    b_frag[2] = temp;
+                }
+
+                if(remaining_log_had_size <= 0) break;
+            }
+
+            if (l == 1) {
+                b32 f0 = ((b_frag[2] & 0xFFFF) << 16) | (b_frag[0] & 0xFFFF);
+                b32 f1 = (b_frag[2] & 0xFFFF0000) | (b_frag[0] >> 16);
+                b32 f2 = ((b_frag[3] & 0xFFFF) << 16) | (b_frag[1] & 0xFFFF);
+                b32 f3 = (b_frag[3] & 0xFFFF0000) | (b_frag[1] >> 16);
+                b_frag[0] = f0;
+                b_frag[1] = f1;
+                b_frag[2] = f2;
+                b_frag[3] = f3;
+            }
+
+            #pragma unroll
+            for (int j = 0; j < 4; j++) {
+                if (l == 0) {
+                    b32* store = (log_had_size <= 8) ? (b32*)a : b_frag_ptr;
+                    store[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8] = b_frag[j];
+                } else {
+                    // TODO: stride
+                    b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (log_had_size - 8)) * (num_chunks * (blockid % warps_per_block) + k));
+                    int colidx = col >> (pending_log_had_size - 4);
+                    int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+                    // TODO: stride
+                    store[rowidx * 128 + colidx] = b_frag[j];
+                }
+            }
+
+            a += 256; // (only affects first 256 size) move on to next chunk by skipping 256 elements in fp16
+            // TODO: stride
+            b_frag_ptr += (l == 0 ? 128 : (128 >> (log_had_size - 8)));
+        }
+        if (log_had_size <= 8)
+            break;
+        if (l == 0)
+            __syncthreads();
     }
 }
 
@@ -256,13 +301,12 @@ wmma_ker(half* __restrict__ a) {
 // template <typename T>
 int main()
 {
-    // py::print("hi", true);
     printf("hi\n");
 
     // 16x4096
-    uint32_t vector_size = 256;
-    constexpr uint32_t log_had_size = 8;
-    uint32_t cols = 4096 * 16;
+    constexpr uint32_t log_had_size = 15;
+    uint32_t vector_size = 1 << log_had_size;
+    uint32_t cols = 16 * (1 << 20) / vector_size; // 16m elements
     // for size 256, use (2, 1)
     // for size 32k use (8, 16)
     constexpr int chunks_per_warp = 8;
@@ -275,37 +319,6 @@ int main()
     cudaMalloc(&dev_ptr, vector_size * cols * sizeof(half));
     cudaMemcpy(dev_ptr, ptr, vector_size * cols * sizeof(half), cudaMemcpyKind::cudaMemcpyHostToDevice);
 
-    half* dev_had_16;
-    half had_16[4][16][16];
-    cudaMalloc(&dev_had_16, sizeof(had_16));
-    for(int s = 0; s < 4; s++)
-        for(int r = 0; r < 16; r++)
-            for(int c = 0; c < 16; c++)
-                had_16[s][r][c] = r == c;
-
-    half rsqrt2 = (half)(1/sqrt(2));
-
-    for(int s = 0; s < 4; s++){
-        int h = 1;
-        while (h < (1 << (s + 1))){
-            // perform FWHT
-            // for i in range(0, len(a), h * 2):
-            for (int i = 0; i < 16; i += h * 2){
-                // for j in range(i, i + h):
-                for (int j = i; j < i + h; j++){
-                    for (int k = 0; k < 16; k++){
-                        half x = had_16[s][j][k];
-                        half y = had_16[s][j + h][k];
-                        had_16[s][j][k] = (x + y) * rsqrt2;
-                        had_16[s][j + h][k] = (x - y) * rsqrt2;
-                    }
-                }
-            }
-            h *= 2;
-        }
-    }
-
-    cudaMemcpy(dev_had_16, had_16, sizeof(had_16), cudaMemcpyKind::cudaMemcpyHostToDevice);
     printf("cols: %d\n", cols);
     void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size>;
     cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
@@ -376,7 +389,6 @@ void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
         cudaMemcpy(a_mat, (void*) a, old_size, cudaMemcpyKind::cudaMemcpyDeviceToDevice);
         cudaMemset((half*) a_mat + M * N, 0, new_size - old_size);
     }
-    // cudaMemset((half*) a_mat, 512, 0); // TODO: for debug
     // for size 256, use (2, 1)
     // for size 32k use (8, 16)
     constexpr int chunks_per_warp_small = 1;// 8;
@@ -384,15 +396,6 @@ void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
     constexpr int chunks_per_warp_large = 2;
     constexpr int warps_per_block_large = 1;
 
-    // constexpr int shared_size = chunks_per_warp * warps_per_block * 128 * 4;
-
-    // constexpr int block_size = 32 * warps_per_block;
-    // int chunks_per_block = chunks_per_warp * warps_per_block;
-    // int grid_size = num_chunks / chunks_per_warp / warps_per_block;
-    
-    // pybind11::print("log_had_size: \n", log_had_size);
-    // pybind11::print("grid_size: \n", grid_size);
-    // pybind11::print("block_size: \n", block_size);
     if (M * N <= 256) {
         switch (log_had_size) {
             case 1: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 1>((half*) a_mat, num_chunks); break;
@@ -433,35 +436,18 @@ void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
     auto status = cudaGetLastError();
     auto status1 = cudaDeviceSynchronize();
     if (status != cudaSuccess || status1 != cudaSuccess) {
-        // pybind11::printf("error\n");
         if (status != cudaSuccess) pybind11::print("CUDA Error %d: %s", status, cudaGetErrorString(status));
         if (status1 != cudaSuccess) pybind11::print("CUDA Sync Error %d: %s", status1, cudaGetErrorString(status1));
         pybind11::print("\n");
         pybind11::print("log_had_size: \n", log_had_size);
         pybind11::print("num_chunks: \n", num_chunks);
-        // pybind11::print("grid_size: \n", grid_size);
-        // pybind11::print("block_size: \n", block_size);
         return;
     }
-
-    // pybind11::print("bye\n");
-    // half* a_cpu = (half*)malloc(M * N * sizeof(half));
-    // cudaMemcpy(a_cpu, (void*) a_mat, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
-    // pybind11::print("bye: \n", M, N, (double)(((half*) a_cpu)[0]));
 
     if ((uint64_t) a_mat != a) {
         cudaMemcpy((void*) a, a_mat, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToDevice);
         cudaFree(a_mat);
     }
-
-    // // TODO: for debug
-    // pybind11::print("bye\n");
-    // half* a_cpu = (half*)malloc(M * N * sizeof(half));
-    // cudaMemcpy(a_cpu, (void*) a, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
-    // pybind11::print("bye: \n", M, N, (uint32_t)(((half*) a_cpu)[0]));
-    // cudaMemset((half*) a, 0, M * N * sizeof(half));
-    // cudaMemcpy(a_cpu, (void*) a, M * N * sizeof(half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
-    // pybind11::print("bye: \n", M, N, (uint32_t)(((half*) a_cpu)[0]));
 }
 
 namespace py = pybind11;
