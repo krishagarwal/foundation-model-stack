@@ -9,6 +9,16 @@ CPLUS_INCLUDE_PATH="/usr/local/cuda/include/:/home/intern/miniconda3/envs/test/l
 CPLUS_INCLUDE_PATH="/usr/local/cuda/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/:/home/intern/miniconda3/envs/test/lib/python3.9/site-packages/torch/include/torch/csrc/api/include/:/home/intern/miniconda3/envs/test/include/python3.9" nvcc -O3 -shared --compiler-options -fPIC $(python3 -m pybind11 --includes) fast_had_trans.cu -o example$(python3-config --extension-suffix)
 
 
+Most recent pybind compile:
+
+CPLUS_INCLUDE_PATH="/usr/local/cuda/include/:/home/raa32/miniconda3/envs/fms/lib/python3.12/site-packages/torch/include/:/home/raa32/miniconda3/envs/fms/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/:/home/raa32/miniconda3/envs/fms/include/python3.12" nvcc -O3 -lineinfo -shared --compiler-options -fPIC $(python3 -m pybind11 --includes) fms/modules/quarot/cuda/cp_async_test.cu -o tensor_core_had_async$(python3-config --extension-suffix) -arch=sm_89
+python fms/modules/quarot/cuda/test.py
+
+Compile without pybind (for running as executable)
+nvcc -O3 fms/modules/quarot/cuda/cp_async_test.cu -o fms/modules/quarot/cuda/cp_async_test -arch=sm_89 -DNOPYBIND
+
+ncu has --import --export options, can print csv with --import > file
+
 tensor test:
 
 CPLUS_INCLUDE_PATH="/usr/local/cuda/include/" nvcc -O3 fms/modules/quarot/cuda/tensor_16_had.cu -o fms/modules/quarot/cuda/tensor_16_had -arch=sm_89

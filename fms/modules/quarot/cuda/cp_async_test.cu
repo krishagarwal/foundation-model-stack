@@ -5,7 +5,9 @@
 
 #include <cuda_fp16.h>
 #include <cuda/annotated_ptr>
+#ifndef NOPYBIND // use -DNOPYBIND to compile without pybind11
 #include <pybind11/pybind11.h>
+#endif
 
 
 #ifndef __CUDACC__
@@ -158,10 +160,9 @@ wmma_ker(half* __restrict__ a) {
         }
     };
     b32 had_frag[8];
-    int remaining_log_had_size2 = (log_had_size - 1) % 8 + 1;
     #pragma unroll
     for (int i = 0; i < 2; i++) {
-        int c_log_h = min(4, remaining_log_had_size2);
+        int c_log_h = (i == 0) ? min(4, log_had_size) : log_had_size % 4;
         #pragma unroll
         for (int j = 0; j < 4; j++) {
             if (c_log_h < 4) {
@@ -176,8 +177,7 @@ wmma_ker(half* __restrict__ a) {
             b32 val = pred1 ? (pred2 ? p_p[c_log_h - 1] : p_n[c_log_h - 1]) : (pred2 ? n_p[c_log_h - 1] : n_n[c_log_h - 1]);
             had_frag[i * 4 + j] = val;
         }
-        remaining_log_had_size2 -= 4;
-        if(remaining_log_had_size2 <= 0) break;
+        if (log_had_size <= 4 || log_had_size % 4 == 0) break;
     }
     
     // do the multiplication
@@ -185,9 +185,11 @@ wmma_ker(half* __restrict__ a) {
     int col = threadid / 4;
     
     #pragma unroll
-    for (int l = 0; l < 2; l++) {
+    for (int l = 0; l < 2; l++) { // TODO: debug
+        // max is just to avoid warning. This is only used if l == 1, but that only happens if log_had_size > 8
+        int iter_2_log_had_size = max(0, log_had_size - 8); 
         // TODO: stride?
-        b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * (l == 0 ? 128 : (128 >> (log_had_size - 8))); // TODO: works for >=16(?) but not for <16 remaining had size
+        b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * (l == 0 ? 128 : (128 >> (iter_2_log_had_size))); // TODO: works for >=16(?) but not for <16 remaining had size
         #pragma unroll
         for (int k = 0; k < num_chunks; k++) {
             b32 b_frag[4];
@@ -211,17 +213,24 @@ wmma_ker(half* __restrict__ a) {
 
             #pragma unroll
             for (int j = 0; j < 4; j++) {
-                // b32* a_loc = &((b32*)(a + 256))[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8];
-                // asm(
-                //     "ld.global.L2::256B.u32 %0, [%1];\n" : "=r"(b_frag[j + 4 * (k + 1)]) : "l"(a_loc)
-                // );
                 if (l == 0) {
                     b_frag[j] = b_frag_ptr[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8];
                 } else {
-                    int colidx = col >> (pending_log_had_size - 4);
-                    int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-                    // TODO: stride
-                    b_frag[j] = b_frag_ptr[rowidx * 128 + colidx];
+                    if (pending_log_had_size < 4) {
+                        int small_factor = 1 << (4 - pending_log_had_size); // 16 / remaning_size
+                        int col_small = col * small_factor; // need to increment col more
+                        int colidx = col_small;
+                        int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
+                        int rowidx_good = rowidx % (1 << pending_log_had_size); // portion of rowidx in bounds
+                        int rowidx_mult = rowidx / (1 << pending_log_had_size); // number of times to increment col
+                        // TODO: stride
+                        b_frag[j] = b_frag_ptr[rowidx_good * 128 + colidx + rowidx_mult];
+                    } else {
+                        int colidx = col >> (pending_log_had_size - 4);
+                        int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+                        // TODO: stride
+                        b_frag[j] = b_frag_ptr[rowidx * 128 + colidx];
+                    }
                 }
             }
 
@@ -240,7 +249,7 @@ wmma_ker(half* __restrict__ a) {
 
             #pragma unroll
             for(int i = 0; i < 2; i++) {
-                int had_off = (remaining_log_had_size < 4 && log_had_size > 4) ? 4 : 0;
+                int had_off = ((remaining_log_had_size < 4) && !(log_had_size <= 4 || log_had_size % 4 == 0)) ? 4 : 0;
                 mma_m16_n16_k16_fp16_fp16_fp16_noacc(had_frag[had_off + 0], had_frag[had_off + 1], had_frag[had_off + 2], had_frag[had_off + 3], b_frag[0], b_frag[1], b_frag[2], b_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3]);
 
                 remaining_log_had_size -= 4;
@@ -275,20 +284,32 @@ wmma_ker(half* __restrict__ a) {
             for (int j = 0; j < 4; j++) {
                 if (l == 0) {
                     b32* store = (log_had_size <= 8) ? (b32*)a : b_frag_ptr;
+                    // b32* store = (b32*)a; // TODO: debug
                     store[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8] = b_frag[j];
                 } else {
                     // TODO: stride
-                    b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (log_had_size - 8)) * (num_chunks * (blockid % warps_per_block) + k));
-                    int colidx = col >> (pending_log_had_size - 4);
-                    int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-                    // TODO: stride
-                    store[rowidx * 128 + colidx] = b_frag[j];
+                    b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (iter_2_log_had_size)) * (num_chunks * (blockid % warps_per_block) + k));
+                    if (pending_log_had_size < 4) {
+                        int small_factor = 1 << (4 - pending_log_had_size); // 16 / remaning_size
+                        int col_small = col * small_factor; // need to increment col more
+                        int colidx = col_small;
+                        int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
+                        int rowidx_good = rowidx % (1 << pending_log_had_size); // portion of rowidx in bounds
+                        int rowidx_mult = rowidx / (1 << pending_log_had_size); // number of times to increment col
+                        // TODO: stride
+                        store[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
+                    } else {
+                        int colidx = col >> (pending_log_had_size - 4);
+                        int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+                        // TODO: stride
+                        store[rowidx * 128 + colidx] = b_frag[j];
+                    }
                 }
             }
 
             a += 256; // (only affects first 256 size) move on to next chunk by skipping 256 elements in fp16
             // TODO: stride
-            b_frag_ptr += (l == 0 ? 128 : (128 >> (log_had_size - 8)));
+            b_frag_ptr += (l == 0 ? 128 : (128 >> (iter_2_log_had_size)));
         }
         if (log_had_size <= 8)
             break;
@@ -298,7 +319,26 @@ wmma_ker(half* __restrict__ a) {
 }
 
 
-// template <typename T>
+template <int chunks_per_warp, int warps_per_block, int log_had_size>
+void __forceinline__ run_matmul_kernel (half* a_mat, int num_chunks) {
+    int shared_size = chunks_per_warp * warps_per_block * 128 * 4;
+    dim3 grid_size = num_chunks / chunks_per_warp / warps_per_block;
+    dim3 block_size = 32 * warps_per_block;
+    if (shared_size > 48 * 1024) {
+        void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size>;
+        cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
+    }
+    if (num_chunks % (chunks_per_warp * warps_per_block) != 0) {
+        #ifndef NOPYBIND
+        pybind11::print("chunks not divisible by chunks per block");
+        #else
+        printf("chunks not divisible by chunks per block\n");
+        #endif
+        return;
+    }
+    wmma_ker<chunks_per_warp, warps_per_block, log_had_size><<<dim3(grid_size), dim3(block_size), shared_size>>>((half*) a_mat);
+}
+
 int main()
 {
     printf("hi\n");
@@ -320,9 +360,7 @@ int main()
     cudaMemcpy(dev_ptr, ptr, vector_size * cols * sizeof(half), cudaMemcpyKind::cudaMemcpyHostToDevice);
 
     printf("cols: %d\n", cols);
-    void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size>;
-    cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
-    wmma_ker<chunks_per_warp, warps_per_block, log_had_size><<<dim3(((cols / 16) * (vector_size / 16)) / chunks_per_warp / warps_per_block, 1), dim3(32 * warps_per_block), 65536>>>(dev_ptr);//, log_had_size);
+    run_matmul_kernel<chunks_per_warp, warps_per_block, log_had_size>(dev_ptr, (cols * vector_size / 256));
     auto status = cudaGetLastError();
     if (status != cudaSuccess) {
         printf("error\n");
@@ -364,21 +402,7 @@ int main()
     return 0;
 }
 
-template <int chunks_per_warp, int warps_per_block, int log_had_size>
-void __forceinline__ run_matmul_kernel (half* a_mat, int num_chunks) {
-    int shared_size = chunks_per_warp * warps_per_block * 128 * 4;
-    dim3 grid_size = num_chunks / chunks_per_warp / warps_per_block;
-    dim3 block_size = 32 * warps_per_block;
-    if (shared_size > 48 * 1024) {
-        void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size>;
-        cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
-    }
-    if (num_chunks % (chunks_per_warp * warps_per_block) != 0) {
-        pybind11::print("chunks not divisible by chunks per block");
-        return;
-    }
-    wmma_ker<chunks_per_warp, warps_per_block, log_had_size><<<dim3(grid_size), dim3(block_size), shared_size>>>((half*) a_mat);
-}
+#ifndef NOPYBIND
 
 void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
     void* a_mat = (void*) a;
@@ -436,8 +460,8 @@ void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
     auto status = cudaGetLastError();
     auto status1 = cudaDeviceSynchronize();
     if (status != cudaSuccess || status1 != cudaSuccess) {
-        if (status != cudaSuccess) pybind11::print("CUDA Error %d: %s", status, cudaGetErrorString(status));
-        if (status1 != cudaSuccess) pybind11::print("CUDA Sync Error %d: %s", status1, cudaGetErrorString(status1));
+        if (status != cudaSuccess) pybind11::print("CUDA Error %d: %s", (long)status, cudaGetErrorString(status));
+        if (status1 != cudaSuccess) pybind11::print("CUDA Sync Error %d: %s", (long)status1, cudaGetErrorString(status1));
         pybind11::print("\n");
         pybind11::print("log_had_size: \n", log_had_size);
         pybind11::print("num_chunks: \n", num_chunks);
@@ -455,3 +479,5 @@ PYBIND11_MODULE(tensor_core_had_async, m) {
     m.doc() = "fast hadamard transform module";
     m.def("fast_had_trans_async", &fast_had_trans, "A function to perform a fast hadamard transform", py::arg("a"), py::arg("M"), py::arg("N"), py::arg("log_had_size"));
 }
+
+#endif
