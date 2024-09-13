@@ -297,12 +297,27 @@ wmma_ker(half* __restrict__ a) {
                         int rowidx_good = rowidx % (1 << pending_log_had_size); // portion of rowidx in bounds
                         int rowidx_mult = rowidx / (1 << pending_log_had_size); // number of times to increment col
                         // TODO: stride
-                        store[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
+                        // store[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
+                        b_frag_ptr[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
                     } else {
+                        // int colidx = col >> (pending_log_had_size - 4);
+                        // int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+                        // // TODO: stride
+                        // store[rowidx * 128 + colidx] = b_frag[j];
+
                         int colidx = col >> (pending_log_had_size - 4);
                         int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
                         // TODO: stride
-                        store[rowidx * 128 + colidx] = b_frag[j];
+                        b_frag_ptr[rowidx * 128 + colidx] = b_frag[j];
+
+                        // int col2 = threadid % 8;
+                        // int row2 = threadid / 8;
+                        // int colidx = col2 >> (pending_log_had_size - 4);
+                        // int rowidx = 2 * row2 + 16 * (col2 % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+                        // // shuffle
+                        // int target = (threadid % 8) * 4 + (threadid / 8);
+                        // b_frag[j] = __shfl_sync(0xFFFFFFFF, b_frag[j], target);
+                        // store[rowidx * 128 + colidx] = b_frag[j];
                     }
                 }
             }
@@ -316,6 +331,24 @@ wmma_ker(half* __restrict__ a) {
         if (l == 0)
             __syncthreads();
     }
+
+    // if did second iteration, store here
+    if (log_had_size > 8) {
+        __syncthreads();
+        half* a_ptr_half = orig_a + (num_chunks * 256) * blockid;
+        b32* a_ptr = (b32*) a_ptr_half + threadid;// + threadid * 4;
+        b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128 + threadid;// + threadid * 4;
+        #pragma unroll
+        for (int k = 0; k < num_chunks; k++) {
+            a_ptr[0] = b_frag_ptr[0];
+            a_ptr[32] = b_frag_ptr[32];
+            a_ptr[64] = b_frag_ptr[64];
+            a_ptr[96] = b_frag_ptr[96];
+            a_ptr += 128;
+            b_frag_ptr += 128;
+        }
+    }
+
 }
 
 
