@@ -20,6 +20,49 @@
 
 typedef uint32_t b32;
 
+constexpr int launch_configs_big[7][2] = {
+    // default
+    {2, 1},
+    {2, 2}, 
+    {2, 4}, 
+    {2, 8}, 
+    {2, 16},
+    {4, 16},
+    {8, 16}
+    // // max coalescing
+    // {2, 1},
+    // {4, 1},
+    // {8, 1},
+    // {16, 1},
+    // {32, 1},
+    // {32, 2},
+    // {32, 4}
+    // // 16
+    // {2, 1},
+    // {4, 1},
+    // {8, 1},
+    // {16, 1},
+    // {16, 2},
+    // {16, 4},
+    // {16, 8}
+    // // 8
+    // {2, 1},
+    // {4, 1},
+    // {8, 1},
+    // {8, 2},
+    // {8, 4},
+    // {8, 8},
+    // {8, 16}
+    // // 4
+    // {2, 1},
+    // {4, 1},
+    // {4, 2},
+    // {4, 4},
+    // {4, 8},
+    // {4, 16},
+    // {4, 32}
+};
+
 // a 4x2, b 2x2, c 2x2
 __device__ __forceinline__ void mma_m16_n8_k16_fp16_fp16_fp16_noacc(b32 a0, b32 a1, b32 a2, b32 a3, b32 b0, b32 b1, b32& c0, b32& c1){
     //d, a, b, c
@@ -183,7 +226,7 @@ wmma_ker(half* __restrict__ a) {
     // do the multiplication
     int row = threadid % 4;
     int col = threadid / 4;
-    
+    b32 b_frag_all[num_chunks][4];
     #pragma unroll
     for (int l = 0; l < 2; l++) { // TODO: debug
         // max is just to avoid warning. This is only used if l == 1, but that only happens if log_had_size > 8
@@ -192,30 +235,78 @@ wmma_ker(half* __restrict__ a) {
         b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * (l == 0 ? 128 : (128 >> (iter_2_log_had_size))); // TODO: works for >=16(?) but not for <16 remaining had size
         #pragma unroll
         for (int k = 0; k < num_chunks; k++) {
-            b32 b_frag[4];
+            // b32 b_frag[4];
+            #define b_frag b_frag_all[k] // TODO: inline this, could cause bugs
             
             if (l == 0) {
                 // TODO: bad fix for k not being recognized as a constexpr
                 switch(k) {
-                    case 0: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 1)); break;
-                    case 1: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 2)); break;
-                    case 2: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 3)); break;
-                    case 3: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 4)); break;
-                    case 4: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 5)); break;
-                    case 5: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 6)); break;
-                    case 6: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 7)); break;
-                    case 7: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - 8)); break;
+                    #define SWITCH_WAIT_ASYNC_LOAD_GROUP(i) case i: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - i - 1)); break;
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(0)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(1)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(2)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(3)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(4)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(5)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(6)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(7)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(8)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(9)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(10)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(11)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(12)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(13)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(14)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(15)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(16)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(17)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(18)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(19)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(20)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(21)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(22)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(23)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(24)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(25)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(26)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(27)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(28)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(29)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(30)
+                    SWITCH_WAIT_ASYNC_LOAD_GROUP(31)
                 }
                 // asm("cp.async.wait_group %0;\n" :: "n"(num_chunks - k - 1));
             }
 
             int pending_log_had_size = log_had_size - l * 8;
 
-            #pragma unroll
-            for (int j = 0; j < 4; j++) {
-                if (l == 0) {
-                    b_frag[j] = b_frag_ptr[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8];
-                } else {
+            if (l == 0) {
+                #pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    int reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
+                    int real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
+                    int real_row = real_thread_id % 4;
+                    int real_col = real_thread_id / 4;
+                    b_frag[j] = b_frag_ptr[(real_row + (reg % 2) * 4) + (real_col + (j / 2) * 8) * 8];
+                }
+
+                if ((threadid & 16) != 0) {
+                    b32 temp = b_frag[0];
+                    b_frag[0] = b_frag[1];
+                    b_frag[1] = temp;
+
+                    temp = b_frag[2];
+                    b_frag[2] = b_frag[3];
+                    b_frag[3] = temp;
+                }
+
+                #pragma unroll
+                for (int j = 1; j < 4; j += 2) {
+                    b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], 16);
+                }
+            } else {
+                #pragma unroll
+                for (int j = 0; j < 4; j++) {
                     if (pending_log_had_size < 4) {
                         int small_factor = 1 << (4 - pending_log_had_size); // 16 / remaning_size
                         int col_small = col * small_factor; // need to increment col more
@@ -280,47 +371,93 @@ wmma_ker(half* __restrict__ a) {
                 b_frag[3] = f3;
             }
 
-            #pragma unroll
-            for (int j = 0; j < 4; j++) {
-                if (l == 0) {
+            // for l == 1 wait for all chunks + shuffle to store
+            if (l == 0) {
+                #pragma unroll
+                for (int j = 1; j < 4; j += 2) {
+                    b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], 16);
+                }
+
+                if ((threadid & 16) != 0) {
+                    b32 temp = b_frag[0];
+                    b_frag[0] = b_frag[1];
+                    b_frag[1] = temp;
+
+                    temp = b_frag[2];
+                    b_frag[2] = b_frag[3];
+                    b_frag[3] = temp;
+                }
+
+                #pragma unroll
+                for (int j = 0; j < 4; j++) {
                     b32* store = (log_had_size <= 8) ? (b32*)a : b_frag_ptr;
+                    int reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
+                    int real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
+                    int real_row = real_thread_id % 4;
+                    int real_col = real_thread_id / 4;
                     // b32* store = (b32*)a; // TODO: debug
-                    store[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8] = b_frag[j];
-                } else {
-                    // TODO: stride
-                    b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (iter_2_log_had_size)) * (num_chunks * (blockid % warps_per_block) + k));
-                    if (pending_log_had_size < 4) {
-                        int small_factor = 1 << (4 - pending_log_had_size); // 16 / remaning_size
-                        int col_small = col * small_factor; // need to increment col more
-                        int colidx = col_small;
-                        int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
-                        int rowidx_good = rowidx % (1 << pending_log_had_size); // portion of rowidx in bounds
-                        int rowidx_mult = rowidx / (1 << pending_log_had_size); // number of times to increment col
-                        // TODO: stride
-                        // store[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
-                        b_frag_ptr[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
-                    } else {
-                        // int colidx = col >> (pending_log_had_size - 4);
-                        // int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-                        // // TODO: stride
-                        // store[rowidx * 128 + colidx] = b_frag[j];
+                    store[(real_row + (reg % 2) * 4) + (real_col + (reg / 2) * 8) * 8] = b_frag[j];
+                }
+            } else {
+                if (log_had_size < 12) {
+                    int part8_log_size = log_had_size - 8;
+                    int xor_val = log_had_size == 9 ? 16 : 1;
+                    #pragma unroll
+                    for (int j = 2; j < 4; j++) {
+                        b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], xor_val);
+                    }
 
-                        int colidx = col >> (pending_log_had_size - 4);
-                        int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-                        // TODO: stride
-                        b_frag_ptr[rowidx * 128 + colidx] = b_frag[j];
+                    if ((threadid & xor_val) != 0) {
+                        b32 temp = b_frag[0];
+                        b_frag[0] = b_frag[2];
+                        b_frag[2] = temp;
 
-                        // int col2 = threadid % 8;
-                        // int row2 = threadid / 8;
-                        // int colidx = col2 >> (pending_log_had_size - 4);
-                        // int rowidx = 2 * row2 + 16 * (col2 % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-                        // // shuffle
-                        // int target = (threadid % 8) * 4 + (threadid / 8);
-                        // b_frag[j] = __shfl_sync(0xFFFFFFFF, b_frag[j], target);
-                        // store[rowidx * 128 + colidx] = b_frag[j];
+                        temp = b_frag[1];
+                        b_frag[1] = b_frag[3];
+                        b_frag[3] = temp;
+                    }
+
+                    b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (part8_log_size)) * (num_chunks * (blockid % warps_per_block) + k));
+                    #pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        int reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
+                        b32 data = b_frag_all[k][j];
+                        int real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
+                        int idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
+                        int rowidx = idx % (1 << part8_log_size);
+                        int colidx = idx >> part8_log_size;
+                        store[rowidx * 128 + colidx] = data;
                     }
                 }
             }
+            
+            // if (l == 0) {
+            //     b32* store = (log_had_size <= 8) ? (b32*)a : b_frag_ptr;
+            //     // b32* store = (b32*)a; // TODO: debug
+            //     store[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8] = b_frag[j];
+            // } else {
+            //     // TODO: stride
+            //     // b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (iter_2_log_had_size)) * (num_chunks * (blockid % warps_per_block) + k));
+            //     // if (pending_log_had_size < 4) {
+            //     //     int small_factor = 1 << (4 - pending_log_had_size); // 16 / remaning_size
+            //     //     int col_small = col * small_factor; // need to increment col more
+            //     //     int colidx = col_small;
+            //     //     int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
+            //     //     int rowidx_good = rowidx % (1 << pending_log_had_size); // portion of rowidx in bounds
+            //     //     int rowidx_mult = rowidx / (1 << pending_log_had_size); // number of times to increment col
+            //     //     // TODO: stride
+            //     //     // store[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
+            //     //     b_frag_ptr[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
+            //     // } else {
+            //     //     // int colidx = col >> (pending_log_had_size - 4);
+            //     //     // int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+            //     //     // // TODO: stride
+            //     //     // store[rowidx * 128 + colidx] = b_frag[j];
+            //     //     int colidx = col >> (pending_log_had_size - 4);
+            //     //     int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
+            //     //     // TODO: stride
+            //     //     b_frag_ptr[rowidx * 128 + colidx] = b_frag[j];
+            // }
 
             a += 256; // (only affects first 256 size) move on to next chunk by skipping 256 elements in fp16
             // TODO: stride
@@ -333,20 +470,141 @@ wmma_ker(half* __restrict__ a) {
     }
 
     // if did second iteration, store here
-    if (log_had_size > 8) {
+    if constexpr(log_had_size >= 12) {
         __syncthreads();
-        half* a_ptr_half = orig_a + (num_chunks * 256) * blockid;
-        b32* a_ptr = (b32*) a_ptr_half + threadid;// + threadid * 4;
-        b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128 + threadid;// + threadid * 4;
+        
+        // bad way (uncoalesced)
+        // if (log_had_size < 9) {
+        //     for (int j = 0; j < 4; j++) {
+        //         for (int k = 0; k < num_chunks; k++) {
+        //             int part8_log_size = log_had_size - 8;
+        //             b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (part8_log_size)) * (num_chunks * (blockid % warps_per_block) + k));
+        //             if (part8_log_size < 4) {
+        //                 int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
+        //                 int colidx = (col << (4 - part8_log_size)) + (rowidx >> part8_log_size);
+        //                 // TODO: stride
+        //                 store[(rowidx % (1 << part8_log_size)) * 128 + colidx] = b_frag[j];
+        //             } else {
+        //                 int colidx = col >> (part8_log_size - 4);
+        //                 int rowidx = 2 * row + 16 * (col % (1 << (part8_log_size - 4))) + (j % 2) + 8 * (j / 2);
+        //                 // TODO: stride
+        //                 store[rowidx * 128 + colidx] = b_frag[j];
+        //             }
+        //         }
+        //     }
+        // } else {
+        //     if (log_had_size < 12) {
+        //         int xor_val = log_had_size == 9 ? 16 : 1;
+        //         for (int k = 0; k < num_chunks; k++) {
+        //             for (int j = 2; j < 4; j++) {
+        //                 b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], xor_val);
+        //             }
+        //         }
+
+        //         b32* store = bfrag_arr + (128 >> (log_had_size - 8)) * (num_chunks * (blockid % warps_per_block));
+
+        //         for (int k = 0; k < num_chunks; k++) {
+        //             for (int j = 0; j < 4; j++) {
+        //                 int reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
+        //                 b32 data = b_frag_all[k][reg];
+        //                 int real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
+        //                 int idx = (128 * k) + (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
+        //                 int rowidx = idx % (1 << (log_had_size - 8));
+        //                 int colidx = idx >> (log_had_size - 8);
+        //                 store[rowidx * 128 + colidx] = data;
+        //             }
+        //         }
+        //     } else {
         #pragma unroll
-        for (int k = 0; k < num_chunks; k++) {
-            a_ptr[0] = b_frag_ptr[0];
-            a_ptr[32] = b_frag_ptr[32];
-            a_ptr[64] = b_frag_ptr[64];
-            a_ptr[96] = b_frag_ptr[96];
-            a_ptr += 128;
-            b_frag_ptr += 128;
+        for (int j = 0; j < 4; j++) {
+            #pragma unroll
+            for (int k = 1; k < num_chunks; k++) {
+                // #define b_frag2 b_frag_all2[k] // TODO: inline this, could cause bugs
+                int threadid_contig = threadid % num_chunks;
+                int threadid_mul = threadid / num_chunks;
+                int threadid2 = (threadid_contig + k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
+                b_frag[j] = __shfl_sync(0xFFFFFFFF, b_frag[j], threadid2);
+            }
         }
+
+        // a + threadblock offset + warp offset
+        // can then index into all chunks owned by this warp
+        b32* store = bfrag_arr + (128 >> (log_had_size - 8)) * (num_chunks * (blockid % warps_per_block));
+
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            #pragma unroll
+            for (int k = 0; k < num_chunks; k++) {
+                // here, j represents register, and k represents 8-offset/chunk
+                int real_chunk_num = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have target thread #'s data
+                // b32 data = b_frag_all[real_chunk_num][j]; // target thread data
+                b32 data;
+                switch (real_chunk_num) {
+                    case 0: data = b_frag_all[0][j]; break;
+                    case 1: data = b_frag_all[1][j]; break;
+                    case 2: data = b_frag_all[2][j]; break;
+                    case 3: data = b_frag_all[3][j]; break;
+                    case 4: data = b_frag_all[4][j]; break;
+                    case 5: data = b_frag_all[5][j]; break;
+                    case 6: data = b_frag_all[6][j]; break;
+                    case 7: data = b_frag_all[7][j]; break;
+                    case 8: data = b_frag_all[8][j]; break;
+                    case 9: data = b_frag_all[9][j]; break;
+                    case 10: data = b_frag_all[10][j]; break;
+                    case 11: data = b_frag_all[11][j]; break;
+                    case 12: data = b_frag_all[12][j]; break;
+                    case 13: data = b_frag_all[13][j]; break;
+                    case 14: data = b_frag_all[14][j]; break;
+                    case 15: data = b_frag_all[15][j]; break;
+                    case 16: data = b_frag_all[16][j]; break;
+                    case 17: data = b_frag_all[17][j]; break;
+                    case 18: data = b_frag_all[18][j]; break;
+                    case 19: data = b_frag_all[19][j]; break;
+                    case 20: data = b_frag_all[20][j]; break;
+                    case 21: data = b_frag_all[21][j]; break;
+                    case 22: data = b_frag_all[22][j]; break;
+                    case 23: data = b_frag_all[23][j]; break;
+                    case 24: data = b_frag_all[24][j]; break;
+                    case 25: data = b_frag_all[25][j]; break;
+                    case 26: data = b_frag_all[26][j]; break;
+                    case 27: data = b_frag_all[27][j]; break;
+                    case 28: data = b_frag_all[28][j]; break;
+                    case 29: data = b_frag_all[29][j]; break;
+                    case 30: data = b_frag_all[30][j]; break;
+                    case 31: data = b_frag_all[31][j]; break;
+                }
+                int real_thread_id = (threadid / num_chunks) * num_chunks + k; // target thread #
+                int chunk_idx = 128 * real_chunk_num; // index due to fetching from another chunk (chunk in which this thread has the target thread's original data)
+                int thread_group_idx = (real_thread_id / 4) * 16; // index due to fetching from another group of num_chunk threads (since shuffle is between num_chunk threads)
+                int thread_idx = (real_thread_id % 4) * 2; // index due to original thread's position within the group of num_chunk threads
+                int reg_idx = (j / 2) * 8 + (j % 2); // index due to target register
+                int idx = chunk_idx + thread_group_idx + thread_idx + reg_idx; // final index
+
+                // fix idx for majorness
+                int rowidx = idx % (1 << (log_had_size - 8));
+                int colidx = idx >> (log_had_size - 8);
+
+                // int k_for_data = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have 0's data
+                // b32 data = b_frag_all2[k_for_data][j];
+                // int colidx = k_for_data;
+                // int k_row_offset = (k % 4) * 2 + (k / 4) * 16;// account for r0r1x4, r2r3x4, etc
+                // int j_row_offset = (j % 2) + (j / 2) * 8;
+                // int thread_row_offset = (threadid / 8) * 16 * 2;
+                // int rowidx = j_row_offset + k_row_offset + thread_row_offset;
+                store[rowidx * 128 + colidx] = data;
+            }
+        }
+            // }
+
+        __syncthreads();
+        b32* store2 = ((b32*) orig_a) + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 128;
+        // flush smem, simply linearly write to store
+        #pragma unroll
+        for (int warp_off = 0; warp_off < (num_chunks * warps_per_block * 128); warp_off += 32 * warps_per_block) {
+            int total_off = warp_off + threadid + (blockid % warps_per_block) * 32;
+            store2[total_off] = bfrag_arr[total_off];
+        }
+        // }
     }
 
 }
@@ -469,21 +727,21 @@ void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
         }
     } else {
         switch (log_had_size) {
-            case 1: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 1>((half*) a_mat, num_chunks); break;
-            case 2: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 2>((half*) a_mat, num_chunks); break;
-            case 3: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 3>((half*) a_mat, num_chunks); break;
-            case 4: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 4>((half*) a_mat, num_chunks); break;
-            case 5: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 5>((half*) a_mat, num_chunks); break;
-            case 6: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 6>((half*) a_mat, num_chunks); break;
-            case 7: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 7>((half*) a_mat, num_chunks); break;
-            case 8: run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 8>((half*) a_mat, num_chunks); break;
-            case 9: run_matmul_kernel<2, 1, 9>((half*) a_mat, num_chunks); break;
-            case 10: run_matmul_kernel<2, 2, 10>((half*) a_mat, num_chunks); break;
-            case 11: run_matmul_kernel<2, 4, 11>((half*) a_mat, num_chunks); break;
-            case 12: run_matmul_kernel<2, 8, 12>((half*) a_mat, num_chunks); break;
-            case 13: run_matmul_kernel<2, 16, 13>((half*) a_mat, num_chunks); break;
-            case 14: run_matmul_kernel<4, 16, 14>((half*) a_mat, num_chunks); break;
-            case 15: run_matmul_kernel<8, 16, 15>((half*) a_mat, num_chunks); break;
+            case 1:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 1>((half*) a_mat, num_chunks); break;
+            case 2:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 2>((half*) a_mat, num_chunks); break;
+            case 3:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 3>((half*) a_mat, num_chunks); break;
+            case 4:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 4>((half*) a_mat, num_chunks); break;
+            case 5:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 5>((half*) a_mat, num_chunks); break;
+            case 6:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 6>((half*) a_mat, num_chunks); break;
+            case 7:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 7>((half*) a_mat, num_chunks); break;
+            case 8:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 8>((half*) a_mat, num_chunks); break;
+            case 9:  run_matmul_kernel<launch_configs_big[0][0], launch_configs_big[0][1], 9 >((half*) a_mat, num_chunks); break;
+            case 10: run_matmul_kernel<launch_configs_big[1][0], launch_configs_big[1][1], 10>((half*) a_mat, num_chunks); break;
+            case 11: run_matmul_kernel<launch_configs_big[2][0], launch_configs_big[2][1], 11>((half*) a_mat, num_chunks); break;
+            case 12: run_matmul_kernel<launch_configs_big[3][0], launch_configs_big[3][1], 12>((half*) a_mat, num_chunks); break;
+            case 13: run_matmul_kernel<launch_configs_big[4][0], launch_configs_big[4][1], 13>((half*) a_mat, num_chunks); break;
+            case 14: run_matmul_kernel<launch_configs_big[5][0], launch_configs_big[5][1], 14>((half*) a_mat, num_chunks); break;
+            case 15: run_matmul_kernel<launch_configs_big[6][0], launch_configs_big[6][1], 15>((half*) a_mat, num_chunks); break;
             default:
                 pybind11::print("Invalid log_had_size: %d\n", log_had_size);
                 return;
