@@ -107,9 +107,8 @@ wmma_ker(half* __restrict__ a) {
     uint threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
 
-    half* orig_a = a;
-    a += blockid * num_chunks * 256;
-    b32* a_ptr = ((b32*) a) + threadid * 4;
+    b32* a_start_ptr = (b32*) (a + blockid * num_chunks * 256); // offset a to where our threadblock starts
+    b32* a_ptr = a_start_ptr + threadid * 4;
     b32* b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128 + threadid * 4;
     #pragma unroll
     for (int k = 0; k < num_chunks; k++) {
@@ -205,7 +204,7 @@ wmma_ker(half* __restrict__ a) {
     b32 had_frag[8];
     #pragma unroll
     for (int i = 0; i < 2; i++) {
-        int c_log_h = (i == 0) ? min(4, log_had_size) : log_had_size % 4;
+        int c_log_h = (i == 0) ? MIN(4, log_had_size) : log_had_size % 4;
         #pragma unroll
         for (int j = 0; j < 4; j++) {
             if (c_log_h < 4) {
@@ -220,26 +219,32 @@ wmma_ker(half* __restrict__ a) {
             b32 val = pred1 ? (pred2 ? p_p[c_log_h - 1] : p_n[c_log_h - 1]) : (pred2 ? n_p[c_log_h - 1] : n_n[c_log_h - 1]);
             had_frag[i * 4 + j] = val;
         }
-        if (log_had_size <= 4 || log_had_size % 4 == 0) break;
+        if constexpr(log_had_size <= 4 || log_had_size % 4 == 0) break;
     }
+
+    // log had size above 8, only used for above 2^8 = 256 size
+    constexpr int part8_log_had_size = log_had_size - 8;
     
-    // do the multiplication
+    // tensor core register layout row/col
     int row = threadid % 4;
     int col = threadid / 4;
-    b32 b_frag_all[num_chunks][4];
+
+    b32 b_frag_all[num_chunks][4]; // for all chunks, holds matrix fragment (which takes 4 regs of fp16x2 * 32 threads)
+    b32* a_chunk_ptr = a_start_ptr; // our first chunk starts at our threadblock start
+
     #pragma unroll
-    for (int l = 0; l < 2; l++) { // TODO: debug
-        // max is just to avoid warning. This is only used if l == 1, but that only happens if log_had_size > 8
-        int iter_2_log_had_size = max(0, log_had_size - 8); 
-        // TODO: stride?
-        b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * (l == 0 ? 128 : (128 >> (iter_2_log_had_size))); // TODO: works for >=16(?) but not for <16 remaining had size
+    for (int l = 0; l < 2; l++) {
+        if constexpr(log_had_size <= 8) { // l == 0 guaranteed, redundant simplified version of else body, to help compiler warnings
+            b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * 128;
+        } else {
+            b_frag_ptr = bfrag_arr + (blockid % warps_per_block) * num_chunks * (l == 0 ? 128 : (128 >> part8_log_had_size));
+        }
         #pragma unroll
         for (int k = 0; k < num_chunks; k++) {
-            // b32 b_frag[4];
             #define b_frag b_frag_all[k] // TODO: inline this, could cause bugs
             
             if (l == 0) {
-                // TODO: bad fix for k not being recognized as a constexpr
+                // TODO: bad fix for k not being recognized as a constexpr by compiler
                 switch(k) {
                     #define SWITCH_WAIT_ASYNC_LOAD_GROUP(i) case i: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - i - 1)); break;
                     SWITCH_WAIT_ASYNC_LOAD_GROUP(0)
@@ -278,9 +283,12 @@ wmma_ker(half* __restrict__ a) {
                 // asm("cp.async.wait_group %0;\n" :: "n"(num_chunks - k - 1));
             }
 
-            int pending_log_had_size = log_had_size - l * 8;
-
             if (l == 0) {
+                // loading for the first iteration
+
+                // thread 0 loads  [t0r0, t16r1, t0r2, t16r3]
+                // thread 16 loads [t0r1, t16r0, t0r3, t16r2]
+                // allows full coalescing, same for t1/t17, t2/t18, etc.
                 #pragma unroll
                 for (int j = 0; j < 4; j++) {
                     int reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
@@ -290,6 +298,8 @@ wmma_ker(half* __restrict__ a) {
                     b_frag[j] = b_frag_ptr[(real_row + (reg % 2) * 4) + (real_col + (j / 2) * 8) * 8];
                 }
 
+                // for t16 swap r0/r1 and r2/r3 to have [t16r0, t0r1, t16r2, t0r3]
+                // so registers are in right order, same for t17, t18, etc.
                 if ((threadid & 16) != 0) {
                     b32 temp = b_frag[0];
                     b_frag[0] = b_frag[1];
@@ -300,32 +310,71 @@ wmma_ker(half* __restrict__ a) {
                     b_frag[3] = temp;
                 }
 
+                // t0 and t16 swap r1 and r3 to have their own data,
+                // same for t1/t17, t2/18, etc.
                 #pragma unroll
                 for (int j = 1; j < 4; j += 2) {
                     b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], 16);
                 }
-            } else {
-                #pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    if (pending_log_had_size < 4) {
-                        int small_factor = 1 << (4 - pending_log_had_size); // 16 / remaning_size
-                        int col_small = col * small_factor; // need to increment col more
-                        int colidx = col_small;
-                        int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
-                        int rowidx_good = rowidx % (1 << pending_log_had_size); // portion of rowidx in bounds
-                        int rowidx_mult = rowidx / (1 << pending_log_had_size); // number of times to increment col
-                        // TODO: stride
-                        b_frag[j] = b_frag_ptr[rowidx_good * 128 + colidx + rowidx_mult];
-                    } else {
-                        int colidx = col >> (pending_log_had_size - 4);
-                        int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-                        // TODO: stride
+            } else if constexpr(log_had_size > 8) { // condition is redundant to help compiler warnings
+                // sizes 512 and above
+                if constexpr(log_had_size < 12) {
+                    // sizes 512, 1k, and 2k
+
+                    // for 512:
+                    //     thread 0 loads  [t0r0, t0r1, t16r2, t16r3]
+                    //     thread 16 loads [t0r2, t0r3, t16r0, t16r1]
+                    //     same for t1/t17, t2/t18, etc.
+                    // for 1k and 2k:
+                    //     thread 0 loads [t0r0, t0r1, t1r2, t1r3]
+                    //     thread 1 loads [t0r2, t0r3, t1r0, t1r1]
+                    //     same for t2/t3, t4/t5, etc.
+                    // allows full coalescing for 512 and 1k, 16x coalescing for 2k
+                    constexpr int xor_val = log_had_size == 9 ? 16 : 1;
+
+                    #pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        int reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
+                        int real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
+                        int idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
+                        int rowidx = idx % (1 << part8_log_had_size);
+                        int colidx = idx >> part8_log_had_size;
+                        b_frag[j] = b_frag_ptr[rowidx * 128 + colidx];
+                    }
+
+                    if ((threadid & xor_val) != 0) {
+                        b32 temp = b_frag[0];
+                        b_frag[0] = b_frag[2];
+                        b_frag[2] = temp;
+
+                        temp = b_frag[1];
+                        b_frag[1] = b_frag[3];
+                        b_frag[3] = temp;
+                    }
+
+                    #pragma unroll
+                    for (int j = 2; j < 4; j++) {
+                        b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], xor_val);
+                    }
+                } else {
+                    // sizes 4k and above
+
+                    // coalescing only possible if we load multiple chunks at a time
+                    // upfront, which wouldn't allow us to overlap loads with compute,
+                    // so just load the naive way
+                    #pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        int colidx = col >> (part8_log_had_size - 4);
+                        int rowidx = 2 * row + 16 * (col % (1 << (part8_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
                         b_frag[j] = b_frag_ptr[rowidx * 128 + colidx];
                     }
                 }
             }
 
             if (l == 1) {
+                // for second iteration, we load 2 consecutive fp16s (1 b32) per register,
+                // but tensor core register layout requires 2 fp16s that are in the
+                // same column/consecutive rows to be in the same register, so do the swap
                 b32 f0 = ((b_frag[1] & 0xFFFF) << 16) | (b_frag[0] & 0xFFFF);
                 b32 f1 = ((b_frag[3] & 0xFFFF) << 16) | (b_frag[2] & 0xFFFF);
                 b32 f2 = (b_frag[1] & 0xFFFF0000) | (b_frag[0] >> 16);
@@ -336,10 +385,8 @@ wmma_ker(half* __restrict__ a) {
                 b_frag[3] = f3;
             }
 
-            int remaining_log_had_size = log_had_size - l * 8;
-
             #pragma unroll
-            for(int i = 0; i < 2; i++) {
+            for(int i = 0, remaining_log_had_size = log_had_size - l * 8; i < 2 && remaining_log_had_size > 0; i++) {
                 int had_off = ((remaining_log_had_size < 4) && !(log_had_size <= 4 || log_had_size % 4 == 0)) ? 4 : 0;
                 mma_m16_n16_k16_fp16_fp16_fp16_noacc(had_frag[had_off + 0], had_frag[had_off + 1], had_frag[had_off + 2], had_frag[had_off + 3], b_frag[0], b_frag[1], b_frag[2], b_frag[3], b_frag[0], b_frag[1], b_frag[2], b_frag[3]);
 
@@ -356,11 +403,10 @@ wmma_ker(half* __restrict__ a) {
                     b_frag[1] = b_frag[2];
                     b_frag[2] = temp;
                 }
-
-                if(remaining_log_had_size <= 0) break;
             }
 
             if (l == 1) {
+                // invert swap from above for second iteration
                 b32 f0 = ((b_frag[2] & 0xFFFF) << 16) | (b_frag[0] & 0xFFFF);
                 b32 f1 = (b_frag[2] & 0xFFFF0000) | (b_frag[0] >> 16);
                 b32 f2 = ((b_frag[3] & 0xFFFF) << 16) | (b_frag[1] & 0xFFFF);
@@ -371,8 +417,8 @@ wmma_ker(half* __restrict__ a) {
                 b_frag[3] = f3;
             }
 
-            // for l == 1 wait for all chunks + shuffle to store
             if (l == 0) {
+                // inverse of coalesced load for first iteration to store result
                 #pragma unroll
                 for (int j = 1; j < 4; j += 2) {
                     b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], 16);
@@ -388,20 +434,22 @@ wmma_ker(half* __restrict__ a) {
                     b_frag[3] = temp;
                 }
 
+                // if only going up to 256 size, store directly back to global memory,
+                // otherwise store back to shared memory for next iteration
+                b32* store = (log_had_size <= 8) ? a_chunk_ptr : b_frag_ptr;
+
                 #pragma unroll
                 for (int j = 0; j < 4; j++) {
-                    b32* store = (log_had_size <= 8) ? (b32*)a : b_frag_ptr;
                     int reg = ((threadid & 16) == 0) ? j : (j / 2 * 2 + (1 - j % 2));
                     int real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
                     int real_row = real_thread_id % 4;
                     int real_col = real_thread_id / 4;
-                    // b32* store = (b32*)a; // TODO: debug
                     store[(real_row + (reg % 2) * 4) + (real_col + (reg / 2) * 8) * 8] = b_frag[j];
                 }
-            } else {
+            } else if constexpr(log_had_size > 8) { // condition is redundant to help compiler warnings
                 if (log_had_size < 12) {
-                    int part8_log_size = log_had_size - 8;
-                    int xor_val = log_had_size == 9 ? 16 : 1;
+                    // inverse of coalesced load for sizes 512, 1k and 2k to store result
+                    constexpr int xor_val = log_had_size == 9 ? 16 : 1;
                     #pragma unroll
                     for (int j = 2; j < 4; j++) {
                         b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], xor_val);
@@ -417,109 +465,41 @@ wmma_ker(half* __restrict__ a) {
                         b_frag[3] = temp;
                     }
 
-                    b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (part8_log_size)) * (num_chunks * (blockid % warps_per_block) + k));
+                    b32* store = (b32*)(a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> part8_log_had_size) * (num_chunks * (blockid % warps_per_block) + k));
                     #pragma unroll
                     for (int j = 0; j < 4; j++) {
                         int reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
                         b32 data = b_frag_all[k][j];
                         int real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
                         int idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
-                        int rowidx = idx % (1 << part8_log_size);
-                        int colidx = idx >> part8_log_size;
+                        int rowidx = idx % (1 << part8_log_had_size);
+                        int colidx = idx >> part8_log_had_size;
                         store[rowidx * 128 + colidx] = data;
                     }
                 }
+                // for size 4k and above, wait to process all chunks so a final store can be performed coalesced
             }
-            
-            // if (l == 0) {
-            //     b32* store = (log_had_size <= 8) ? (b32*)a : b_frag_ptr;
-            //     // b32* store = (b32*)a; // TODO: debug
-            //     store[(row + (j % 2) * 4) + (col + (j / 2) * 8) * 8] = b_frag[j];
-            // } else {
-            //     // TODO: stride
-            //     // b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (iter_2_log_had_size)) * (num_chunks * (blockid % warps_per_block) + k));
-            //     // if (pending_log_had_size < 4) {
-            //     //     int small_factor = 1 << (4 - pending_log_had_size); // 16 / remaning_size
-            //     //     int col_small = col * small_factor; // need to increment col more
-            //     //     int colidx = col_small;
-            //     //     int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
-            //     //     int rowidx_good = rowidx % (1 << pending_log_had_size); // portion of rowidx in bounds
-            //     //     int rowidx_mult = rowidx / (1 << pending_log_had_size); // number of times to increment col
-            //     //     // TODO: stride
-            //     //     // store[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
-            //     //     b_frag_ptr[rowidx_good * 128 + colidx + rowidx_mult] = b_frag[j];
-            //     // } else {
-            //     //     // int colidx = col >> (pending_log_had_size - 4);
-            //     //     // int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-            //     //     // // TODO: stride
-            //     //     // store[rowidx * 128 + colidx] = b_frag[j];
-            //     //     int colidx = col >> (pending_log_had_size - 4);
-            //     //     int rowidx = 2 * row + 16 * (col % (1 << (pending_log_had_size - 4))) + (j % 2) + 8 * (j / 2);
-            //     //     // TODO: stride
-            //     //     b_frag_ptr[rowidx * 128 + colidx] = b_frag[j];
-            // }
 
-            a += 256; // (only affects first 256 size) move on to next chunk by skipping 256 elements in fp16
-            // TODO: stride
-            b_frag_ptr += (l == 0 ? 128 : (128 >> (iter_2_log_had_size)));
+            a_chunk_ptr += 128; // (only affects first 256 size) move on to next chunk by skipping 256 elements in fp16 (= 128 in b32)
+            if constexpr(log_had_size > 8) {
+                b_frag_ptr += (l == 0 ? 128 : (128 >> part8_log_had_size));
+            } else { // else is redundant, simplified version of if body, to help compiler warnings
+                b_frag_ptr += 128;
+            }
         }
         if (log_had_size <= 8)
             break;
         if (l == 0)
-            __syncthreads();
+            __syncthreads(); // sync between first and second iterations if above size 256
     }
 
-    // if did second iteration, store here
     if constexpr(log_had_size >= 12) {
-        __syncthreads();
-        
-        // bad way (uncoalesced)
-        // if (log_had_size < 9) {
-        //     for (int j = 0; j < 4; j++) {
-        //         for (int k = 0; k < num_chunks; k++) {
-        //             int part8_log_size = log_had_size - 8;
-        //             b32* store = (b32*)(orig_a + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 256 + (256 >> (part8_log_size)) * (num_chunks * (blockid % warps_per_block) + k));
-        //             if (part8_log_size < 4) {
-        //                 int rowidx = 2 * row + (j % 2) + 8 * (j / 2);
-        //                 int colidx = (col << (4 - part8_log_size)) + (rowidx >> part8_log_size);
-        //                 // TODO: stride
-        //                 store[(rowidx % (1 << part8_log_size)) * 128 + colidx] = b_frag[j];
-        //             } else {
-        //                 int colidx = col >> (part8_log_size - 4);
-        //                 int rowidx = 2 * row + 16 * (col % (1 << (part8_log_size - 4))) + (j % 2) + 8 * (j / 2);
-        //                 // TODO: stride
-        //                 store[rowidx * 128 + colidx] = b_frag[j];
-        //             }
-        //         }
-        //     }
-        // } else {
-        //     if (log_had_size < 12) {
-        //         int xor_val = log_had_size == 9 ? 16 : 1;
-        //         for (int k = 0; k < num_chunks; k++) {
-        //             for (int j = 2; j < 4; j++) {
-        //                 b_frag[j] = __shfl_xor_sync(0xFFFFFFFF, b_frag[j], xor_val);
-        //             }
-        //         }
+        // for sizes 4k and above, perform final coalesced store after processing all chunks
 
-        //         b32* store = bfrag_arr + (128 >> (log_had_size - 8)) * (num_chunks * (blockid % warps_per_block));
-
-        //         for (int k = 0; k < num_chunks; k++) {
-        //             for (int j = 0; j < 4; j++) {
-        //                 int reg = ((threadid & xor_val) == 0) ? j : (j + 2) % 4;
-        //                 b32 data = b_frag_all[k][reg];
-        //                 int real_thread_id = reg < 2 ? threadid : (threadid ^ xor_val);
-        //                 int idx = (128 * k) + (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
-        //                 int rowidx = idx % (1 << (log_had_size - 8));
-        //                 int colidx = idx >> (log_had_size - 8);
-        //                 store[rowidx * 128 + colidx] = data;
-        //             }
-        //         }
-        //     } else {
         #pragma unroll
         for (int j = 0; j < 4; j++) {
             #pragma unroll
             for (int k = 1; k < num_chunks; k++) {
-                // #define b_frag2 b_frag_all2[k] // TODO: inline this, could cause bugs
                 int threadid_contig = threadid % num_chunks;
                 int threadid_mul = threadid / num_chunks;
                 int threadid2 = (threadid_contig + k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
@@ -529,7 +509,7 @@ wmma_ker(half* __restrict__ a) {
 
         // a + threadblock offset + warp offset
         // can then index into all chunks owned by this warp
-        b32* store = bfrag_arr + (128 >> (log_had_size - 8)) * (num_chunks * (blockid % warps_per_block));
+        b32* store = bfrag_arr + (128 >> part8_log_had_size) * (num_chunks * (blockid % warps_per_block));
 
         #pragma unroll
         for (int j = 0; j < 4; j++) {
@@ -581,30 +561,21 @@ wmma_ker(half* __restrict__ a) {
                 int idx = chunk_idx + thread_group_idx + thread_idx + reg_idx; // final index
 
                 // fix idx for majorness
-                int rowidx = idx % (1 << (log_had_size - 8));
-                int colidx = idx >> (log_had_size - 8);
+                int rowidx = idx % (1 << part8_log_had_size);
+                int colidx = idx >> part8_log_had_size;
 
-                // int k_for_data = (num_chunks - (threadid % num_chunks) + k) % num_chunks; // chunk at which you have 0's data
-                // b32 data = b_frag_all2[k_for_data][j];
-                // int colidx = k_for_data;
-                // int k_row_offset = (k % 4) * 2 + (k / 4) * 16;// account for r0r1x4, r2r3x4, etc
-                // int j_row_offset = (j % 2) + (j / 2) * 8;
-                // int thread_row_offset = (threadid / 8) * 16 * 2;
-                // int rowidx = j_row_offset + k_row_offset + thread_row_offset;
                 store[rowidx * 128 + colidx] = data;
             }
         }
-            // }
 
         __syncthreads();
-        b32* store2 = ((b32*) orig_a) + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 128;
+        store = ((b32*) a) + (blockid / warps_per_block) * (num_chunks * warps_per_block) * 128;
         // flush smem, simply linearly write to store
         #pragma unroll
         for (int warp_off = 0; warp_off < (num_chunks * warps_per_block * 128); warp_off += 32 * warps_per_block) {
             int total_off = warp_off + threadid + (blockid % warps_per_block) * 32;
-            store2[total_off] = bfrag_arr[total_off];
+            store[total_off] = bfrag_arr[total_off];
         }
-        // }
     }
 
 }
