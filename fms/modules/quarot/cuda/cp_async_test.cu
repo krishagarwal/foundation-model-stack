@@ -20,47 +20,31 @@
 
 typedef uint32_t b32;
 
-constexpr int launch_configs_big[7][2] = {
+constexpr int launch_configs_big[7][3] = {
     // default
-    {2, 1},
-    {2, 2}, 
-    {2, 4}, 
-    {2, 8}, 
-    {2, 16},
-    {4, 16},
-    {8, 16}
-    // // max coalescing
-    // {2, 1},
-    // {4, 1},
-    // {8, 1},
-    // {16, 1},
-    // {32, 1},
-    // {32, 2},
-    // {32, 4}
-    // // 16
-    // {2, 1},
-    // {4, 1},
-    // {8, 1},
-    // {16, 1},
-    // {16, 2},
-    // {16, 4},
-    // {16, 8}
-    // // 8
-    // {2, 1},
-    // {4, 1},
-    // {8, 1},
-    // {8, 2},
-    // {8, 4},
-    // {8, 8},
-    // {8, 16}
-    // // 4
-    // {2, 1},
-    // {4, 1},
-    // {4, 2},
-    // {4, 4},
-    // {4, 8},
-    // {4, 16},
-    // {4, 32}
+    {2, 1, 24},
+    {2, 2, 16}, 
+    {2, 4, 8}, 
+    {2, 8, 4}, 
+    {2, 16, 3},
+    {4, 16, 2},
+    {8, 16, 1}
+    // // extra coalescing
+    // {2, 1, 24},
+    // {2, 2, 16}, 
+    // {2, 4, 8}, 
+    // {2, 8, 4}, 
+    // {4, 8, 3},
+    // {8, 8, 2},
+    // {16, 8, 1}
+    // // less coalescing
+    // {2, 1, 24},
+    // {2, 2, 16}, 
+    // {2, 4, 8}, 
+    // {2, 8, 4}, 
+    // {1, 32, 1},
+    // {2, 32, 1},
+    // {4, 32, 1}
 };
 
 // a 4x2, b 2x2, c 2x2
@@ -98,9 +82,9 @@ static void inline wait_group() {
 #define n_p(i) ((fp16_1n[i] & 0x0000FFFF) | fp16_1p[i] << 16)
 #define n_n(i) ((fp16_1n[i] & 0x0000FFFF) | fp16_1n[i] << 16)
 
-template<int num_chunks, int warps_per_block, int log_had_size>
+template<int num_chunks, int warps_per_block, int log_had_size, int blocks_per_sm>
 // TODO: check if blocks per SM is correctly calculated
-__global__ void __launch_bounds__(32 * warps_per_block, MIN(MIN((cudaSharedmemCarveoutMaxShared * 1024) / (num_chunks * warps_per_block * 128 * 4), 24), 48 / warps_per_block))//MIN(24, 48 / warps_per_block))
+__global__ void __launch_bounds__(32 * warps_per_block, blocks_per_sm)// MIN(MIN((cudaSharedmemCarveoutMaxShared * 1024) / (num_chunks * warps_per_block * 128 * 4), 24), 48 / warps_per_block))//MIN(24, 48 / warps_per_block))
 // a is column major, b is row major
 wmma_ker(half* __restrict__ a) {
     uint blockid = blockIdx.x * warps_per_block + threadIdx.x / 32;
@@ -126,7 +110,7 @@ wmma_ker(half* __restrict__ a) {
             int real_thread_id = (reg == 0 || reg == 2) ? threadid : (threadid ^ 16);
             int real_row = real_thread_id % 4;
             int real_col = real_thread_id / 4;
-            b_frag_all[k][j] = a[(real_row + (reg % 2) * 4) + (real_col + (j / 2) * 8) * 8 + k * 128];
+            b_frag_all[k][j] = ((b32*)a)[(real_row + (reg % 2) * 4) + (real_col + (j / 2) * 8) * 8 + (k + blockid * num_chunks) * 128];
         }
 
         // for t16 swap r0/r1 and r2/r3 to have [t16r0, t0r1, t16r2, t0r3]
@@ -277,6 +261,7 @@ wmma_ker(half* __restrict__ a) {
                 if constexpr(log_had_size < 12) {
                     #pragma unroll
                     for (int k = 0; k < num_chunks; k++) {
+                        b32* b_frag_ptr2 = b_frag_ptr + k * (128 >> part8_log_had_size);
                         #define b_frag b_frag_all[k] // TODO: inline this, could cause bugs
                         // sizes 512, 1k, and 2k
 
@@ -298,7 +283,7 @@ wmma_ker(half* __restrict__ a) {
                             int idx = (real_thread_id / 4 * 16) + (real_thread_id % 4 * 2) + (reg / 2 * 8) + (reg % 2);
                             int rowidx = idx % (1 << part8_log_had_size);
                             int colidx = idx >> part8_log_had_size;
-                            b_frag[j] = b_frag_ptr[rowidx * 128 + colidx];
+                            b_frag[j] = b_frag_ptr2[rowidx * 128 + colidx];
                         }
 
                         if ((threadid & xor_val) != 0) {
@@ -377,7 +362,7 @@ wmma_ker(half* __restrict__ a) {
                         for (int k = 1; k < num_chunks; k++) {
                             int threadid_contig = threadid % num_chunks;
                             int threadid_mul = threadid / num_chunks;
-                            int threadid2 = (threadid_contig + k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
+                            int threadid2 = (threadid_contig + num_chunks - k) % num_chunks + threadid_mul * num_chunks; // thread to give your data to
                             b_frag[j] = __shfl_sync(0xFFFFFFFF, b_frag[j], threadid2);
                         }
                     }
@@ -607,13 +592,13 @@ wmma_ker(half* __restrict__ a) {
 }
 
 
-template <int chunks_per_warp, int warps_per_block, int log_had_size>
+template <int chunks_per_warp, int warps_per_block, int log_had_size, int blocks_per_sm>
 void __forceinline__ run_matmul_kernel (half* a_mat, int num_chunks) {
     int shared_size = chunks_per_warp * warps_per_block * 128 * 4;
     dim3 grid_size = num_chunks / chunks_per_warp / warps_per_block;
     dim3 block_size = 32 * warps_per_block;
     if (shared_size > 48 * 1024) {
-        void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size>;
+        void* func_ptr = (void*)wmma_ker<chunks_per_warp, warps_per_block, log_had_size, blocks_per_sm>;
         cudaFuncSetAttribute(func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
     }
     if (num_chunks % (chunks_per_warp * warps_per_block) != 0) {
@@ -624,7 +609,7 @@ void __forceinline__ run_matmul_kernel (half* a_mat, int num_chunks) {
         #endif
         return;
     }
-    wmma_ker<chunks_per_warp, warps_per_block, log_had_size><<<dim3(grid_size), dim3(block_size), shared_size>>>((half*) a_mat);
+    wmma_ker<chunks_per_warp, warps_per_block, log_had_size, blocks_per_sm><<<dim3(grid_size), dim3(block_size), shared_size>>>((half*) a_mat);
 }
 
 int main()
@@ -639,6 +624,7 @@ int main()
     // for size 32k use (8, 16)
     constexpr int chunks_per_warp = 8;
     constexpr int warps_per_block = 16;
+    constexpr int blocks_per_sm = 1;
 
     half* ptr = (half*)malloc(vector_size * cols * sizeof(half)); // col major
 
@@ -648,7 +634,7 @@ int main()
     cudaMemcpy(dev_ptr, ptr, vector_size * cols * sizeof(half), cudaMemcpyKind::cudaMemcpyHostToDevice);
 
     printf("cols: %d\n", cols);
-    run_matmul_kernel<chunks_per_warp, warps_per_block, log_had_size>(dev_ptr, (cols * vector_size / 256));
+    run_matmul_kernel<chunks_per_warp, warps_per_block, log_had_size, blocks_per_sm>(dev_ptr, (cols * vector_size / 256));
     auto status = cudaGetLastError();
     if (status != cudaSuccess) {
         printf("error\n");
@@ -705,40 +691,42 @@ void fast_had_trans(uint64_t a, uint32_t M, uint32_t N, uint32_t log_had_size) {
     // for size 32k use (8, 16)
     constexpr int chunks_per_warp_small = 1;// 8;
     constexpr int warps_per_block_small = 1;//2;//16;
+    constexpr int blocks_per_sm_small = 24;
     constexpr int chunks_per_warp_large = 2;
     constexpr int warps_per_block_large = 1;
+    constexpr int blocks_per_sm_large = 24;
 
     if (M * N <= 256) {
         switch (log_had_size) {
-            case 1: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 1>((half*) a_mat, num_chunks); break;
-            case 2: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 2>((half*) a_mat, num_chunks); break;
-            case 3: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 3>((half*) a_mat, num_chunks); break;
-            case 4: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 4>((half*) a_mat, num_chunks); break;
-            case 5: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 5>((half*) a_mat, num_chunks); break;
-            case 6: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 6>((half*) a_mat, num_chunks); break;
-            case 7: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 7>((half*) a_mat, num_chunks); break;
-            case 8: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 8>((half*) a_mat, num_chunks); break;
+            case 1: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 1, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
+            case 2: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 2, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
+            case 3: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 3, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
+            case 4: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 4, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
+            case 5: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 5, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
+            case 6: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 6, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
+            case 7: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 7, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
+            case 8: run_matmul_kernel<chunks_per_warp_small, warps_per_block_small, 8, blocks_per_sm_small>((half*) a_mat, num_chunks); break;
             default:
                 pybind11::print("Invalid log_had_size: %d\n", log_had_size);
                 return;
         }
     } else {
         switch (log_had_size) {
-            case 1:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 1>((half*) a_mat, num_chunks); break;
-            case 2:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 2>((half*) a_mat, num_chunks); break;
-            case 3:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 3>((half*) a_mat, num_chunks); break;
-            case 4:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 4>((half*) a_mat, num_chunks); break;
-            case 5:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 5>((half*) a_mat, num_chunks); break;
-            case 6:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 6>((half*) a_mat, num_chunks); break;
-            case 7:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 7>((half*) a_mat, num_chunks); break;
-            case 8:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 8>((half*) a_mat, num_chunks); break;
-            case 9:  run_matmul_kernel<launch_configs_big[0][0], launch_configs_big[0][1], 9 >((half*) a_mat, num_chunks); break;
-            case 10: run_matmul_kernel<launch_configs_big[1][0], launch_configs_big[1][1], 10>((half*) a_mat, num_chunks); break;
-            case 11: run_matmul_kernel<launch_configs_big[2][0], launch_configs_big[2][1], 11>((half*) a_mat, num_chunks); break;
-            case 12: run_matmul_kernel<launch_configs_big[3][0], launch_configs_big[3][1], 12>((half*) a_mat, num_chunks); break;
-            case 13: run_matmul_kernel<launch_configs_big[4][0], launch_configs_big[4][1], 13>((half*) a_mat, num_chunks); break;
-            case 14: run_matmul_kernel<launch_configs_big[5][0], launch_configs_big[5][1], 14>((half*) a_mat, num_chunks); break;
-            case 15: run_matmul_kernel<launch_configs_big[6][0], launch_configs_big[6][1], 15>((half*) a_mat, num_chunks); break;
+            case 1:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 1, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 2:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 2, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 3:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 3, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 4:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 4, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 5:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 5, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 6:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 6, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 7:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 7, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 8:  run_matmul_kernel<chunks_per_warp_large, warps_per_block_large, 8, blocks_per_sm_large>((half*) a_mat, num_chunks); break;
+            case 9:  run_matmul_kernel<launch_configs_big[0][0], launch_configs_big[0][1], 9 , launch_configs_big[0][2]>((half*) a_mat, num_chunks); break;
+            case 10: run_matmul_kernel<launch_configs_big[1][0], launch_configs_big[1][1], 10, launch_configs_big[1][2]>((half*) a_mat, num_chunks); break;
+            case 11: run_matmul_kernel<launch_configs_big[2][0], launch_configs_big[2][1], 11, launch_configs_big[2][2]>((half*) a_mat, num_chunks); break;
+            case 12: run_matmul_kernel<launch_configs_big[3][0], launch_configs_big[3][1], 12, launch_configs_big[3][2]>((half*) a_mat, num_chunks); break;
+            case 13: run_matmul_kernel<launch_configs_big[4][0], launch_configs_big[4][1], 13, launch_configs_big[4][2]>((half*) a_mat, num_chunks); break;
+            case 14: run_matmul_kernel<launch_configs_big[5][0], launch_configs_big[5][1], 14, launch_configs_big[5][2]>((half*) a_mat, num_chunks); break;
+            case 15: run_matmul_kernel<launch_configs_big[6][0], launch_configs_big[6][1], 15, launch_configs_big[6][2]>((half*) a_mat, num_chunks); break;
             default:
                 pybind11::print("Invalid log_had_size: %d\n", log_had_size);
                 return;
