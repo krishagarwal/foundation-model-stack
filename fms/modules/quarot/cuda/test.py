@@ -7,7 +7,8 @@ import tensor_core_had_async
 # set to false to check performance
 correctness_check = False
 # set to warmup count + 1 to check performance
-runs_per_size = 5
+# for quick testing, 2 is good.
+runs_per_size = 2
 
 # hadamard sizes
 test_sizes_m = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768] # 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768 #2, 4, 8, 16, 32, 64, 
