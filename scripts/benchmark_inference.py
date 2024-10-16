@@ -142,7 +142,7 @@ parser.add_argument(
     type=str,
     help="enables quantization to the specified dtype",
     default="",
-    choices=["", "int8", "int4-fake"],
+    choices=["", "int8", "int4"],
 )
 parser.add_argument(
     "--rotate",
